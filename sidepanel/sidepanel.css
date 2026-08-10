@@ -1,0 +1,280 @@
+:root {
+  color-scheme: dark;
+  --canvas: #111716;
+  --surface: #17201f;
+  --surface-raised: #1d2826;
+  --border: #344442;
+  --border-strong: #4a5e5a;
+  --text: #edf3ef;
+  --muted: #9eafaa;
+  --teal: #37c8ae;
+  --teal-strong: #16a98f;
+  --amber: #e1a950;
+  --danger: #e47f76;
+  --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--text);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app-shell {
+  width: min(100% - 28px, 720px);
+  margin: 0 auto;
+  padding: 22px 0 34px;
+}
+
+.app-header,
+.results-header,
+.section-heading,
+.brand-lockup {
+  display: flex;
+  align-items: center;
+}
+
+.app-header {
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 22px;
+  border-bottom: 1px solid var(--border);
+}
+
+.brand-lockup {
+  min-width: 0;
+  gap: 12px;
+}
+
+.brand-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  place-items: center;
+  border: 1px solid var(--teal);
+  border-radius: 7px;
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+.brand-lockup p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.read-only-badge,
+.result-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+main {
+  display: grid;
+  gap: 30px;
+  padding-top: 26px;
+}
+
+.connection-section {
+  padding-bottom: 30px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-heading {
+  gap: 10px;
+}
+
+.eyebrow {
+  color: var(--teal);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+h2 {
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.connection-form {
+  display: grid;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.field input {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  background: #0e1514;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.field input::placeholder {
+  color: #71817d;
+}
+
+.field input:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(55, 200, 174, 0.15);
+}
+
+.query-button {
+  min-height: 46px;
+  margin-top: 4px;
+  border: 1px solid var(--teal-strong);
+  border-radius: 7px;
+  background: var(--teal-strong);
+  color: #071311;
+  font-weight: 750;
+}
+
+.query-button:hover:not(:disabled) {
+  background: var(--teal);
+}
+
+.query-button:focus-visible {
+  outline: 3px solid rgba(225, 169, 80, 0.45);
+  outline-offset: 2px;
+}
+
+.query-button:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+.results-header {
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.query-state,
+.error-state {
+  margin-top: 20px;
+  padding: 13px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.error-state {
+  border-color: rgba(228, 127, 118, 0.5);
+  color: var(--danger);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.results-table-wrap {
+  margin-top: 18px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  color: var(--muted);
+  background: var(--surface-raised);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+tbody tr:hover {
+  background: rgba(55, 200, 174, 0.055);
+}
+
+.mono,
+.status-cell {
+  font-family: var(--mono);
+}
+
+.status-cell {
+  color: var(--amber);
+}
+
+.account-name {
+  max-width: 220px;
+  overflow-wrap: anywhere;
+}
+
+.error-copy {
+  min-width: 260px;
+  color: var(--muted);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}

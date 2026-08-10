@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sub2api reoauth</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">SR</span>
+          <div>
+            <h1>sub2api reoauth</h1>
+            <p>OpenAI OAuth 候选账号查询</p>
+          </div>
+        </div>
+        <span class="read-only-badge">只读</span>
+      </header>
+
+      <main>
+        <section class="connection-section" aria-labelledby="connection-heading">
+          <div class="section-heading">
+            <p class="eyebrow">连接</p>
+            <h2 id="connection-heading">SUB2API</h2>
+          </div>
+
+          <form id="query-form" class="connection-form">
+            <label class="field">
+              <span>SUB2API 地址</span>
+              <input id="base-url" name="baseUrl" type="url" inputmode="url" autocomplete="url" required placeholder="http://localhost:8080/admin/accounts">
+            </label>
+
+            <label class="field">
+              <span>账号</span>
+              <input id="email" name="email" type="email" autocomplete="username" required placeholder="admin@sub2api.local">
+            </label>
+
+            <label class="field">
+              <span>密码</span>
+              <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="管理员密码">
+            </label>
+
+            <label class="field">
+              <span>分组</span>
+              <input id="group-name" name="groupName" type="text" required value="codex 错误" placeholder="codex 错误">
+            </label>
+
+            <button id="query-button" class="query-button" type="submit">查询账号</button>
+          </form>
+        </section>
+
+        <section class="results-section" aria-labelledby="results-heading" aria-live="polite">
+          <div class="results-header">
+            <div class="section-heading">
+              <p class="eyebrow">结果</p>
+              <h2 id="results-heading">待重授权账号</h2>
+            </div>
+            <span id="result-count" class="result-count">0</span>
+          </div>
+
+          <div id="query-state" class="query-state">等待查询</div>
+          <div id="error-state" class="error-state" hidden></div>
+
+          <div id="results-table-wrap" class="results-table-wrap" hidden>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">ID</th>
+                  <th scope="col">账号</th>
+                  <th scope="col">状态</th>
+                  <th scope="col">代理</th>
+                  <th scope="col">错误信息</th>
+                </tr>
+              </thead>
+              <tbody id="results-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

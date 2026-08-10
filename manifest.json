@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "sub2api reoauth",
+  "version": "0.2.0",
+  "description": "只读查询待重授权的 OpenAI OAuth 账号",
+  "permissions": [
+    "sidePanel",
+    "storage"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background/background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "action": {
+    "default_title": "打开 sub2api reoauth"
+  }
+}
