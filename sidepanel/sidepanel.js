@@ -6,6 +6,19 @@ const errorState = document.querySelector('#error-state');
 const tableWrap = document.querySelector('#results-table-wrap');
 const resultsBody = document.querySelector('#results-body');
 const savedFieldNames = ['baseUrl', 'email', 'groupName'];
+const learningButtons = Array.from(document.querySelectorAll('[data-learning-action]'));
+const loginEmailInput = document.querySelector('#login-email');
+const loginPasswordInput = document.querySelector('#login-password');
+const verificationCodeInput = document.querySelector('#verification-code');
+const callbackUrl = document.querySelector('#callback-url');
+const clearCallbackButton = document.querySelector('#clear-callback');
+const learningStatus = document.querySelector('#learning-status');
+const openAiLearningOrigins = [
+  'https://*.openai.com/*',
+  'https://chatgpt.com/*',
+  'http://localhost/*',
+  'https://localhost/*',
+];
 
 function setBusy(isBusy) {
   button.disabled = isBusy;
@@ -118,11 +131,174 @@ async function queryAccounts(event) {
   }
 }
 
+function setLearningStatus(message, kind = 'idle') {
+  learningStatus.textContent = message;
+  learningStatus.dataset.kind = kind;
+}
+
+function setLearningBusy(isBusy) {
+  for (const learningButton of learningButtons) {
+    learningButton.disabled = isBusy;
+  }
+}
+
+async function ensureOpenAiLearningPermission() {
+  const hasPermission = await chrome.permissions.contains({ origins: openAiLearningOrigins });
+  if (hasPermission) return;
+
+  const granted = await chrome.permissions.request({ origins: openAiLearningOrigins });
+  if (!granted) {
+    throw new Error('需要 OpenAI 和 localhost 的站点访问权限才能执行学习流程。');
+  }
+}
+
+async function sendLearningMessage(message) {
+  const response = await chrome.runtime.sendMessage(message);
+  if (!response?.ok) {
+    throw new Error(response?.error || '学习步骤未完成。');
+  }
+  return response.result || {};
+}
+
+function getVerificationCode() {
+  return String(verificationCodeInput.value || '').replace(/\s+/g, '');
+}
+
+async function confirmManualVerificationCode() {
+  const result = await sendLearningMessage({
+    type: 'CONFIRM_MANUAL_VERIFICATION_CODE',
+    code: getVerificationCode(),
+  });
+  verificationCodeInput.value = result.code;
+  setLearningStatus(`已确认 ${result.code.length} 位验证码；下一步可填入页面。`, 'success');
+}
+
+async function runPageLearningStep(action, value = {}) {
+  await ensureOpenAiLearningPermission();
+  return sendLearningMessage({
+    type: 'RUN_OPENAI_LEARNING_STEP',
+    action,
+    value,
+  });
+}
+
+function formatActionResult(result, fallback) {
+  if (result?.buttonText) return `${fallback}（${result.buttonText}）`;
+  return fallback;
+}
+
+function renderCallbackState(state = {}) {
+  const url = String(state.callbackUrl || '');
+  callbackUrl.value = url;
+  clearCallbackButton.hidden = !url && !state.active;
+
+  if (url) {
+    setLearningStatus('已捕获 localhost 回调地址。', 'success');
+  } else if (state.active) {
+    setLearningStatus('正在监听 localhost 回调地址…', 'pending');
+  }
+}
+
+async function refreshCallbackState() {
+  const state = await sendLearningMessage({ type: 'GET_OPENAI_CALLBACK_CAPTURE' });
+  renderCallbackState(state);
+}
+
+async function armCallbackCapture() {
+  await ensureOpenAiLearningPermission();
+  const state = await sendLearningMessage({ type: 'ARM_OPENAI_CALLBACK_CAPTURE' });
+  renderCallbackState(state);
+}
+
+async function handleLearningAction(action) {
+  switch (action) {
+    case 'fill-email': {
+      const result = await runPageLearningStep(action, { email: loginEmailInput.value });
+      setLearningStatus(formatActionResult(result, '邮箱已填入页面。'), 'success');
+      return;
+    }
+    case 'continue-after-email': {
+      const result = await runPageLearningStep(action);
+      setLearningStatus(formatActionResult(result, '已点击邮箱页的继续按钮。'), 'success');
+      return;
+    }
+    case 'fill-password': {
+      const result = await runPageLearningStep(action, { password: loginPasswordInput.value });
+      setLearningStatus(formatActionResult(result, '密码已填入页面。'), 'success');
+      return;
+    }
+    case 'continue-after-password': {
+      const result = await runPageLearningStep(action);
+      setLearningStatus(formatActionResult(result, '已点击密码页的继续按钮。'), 'success');
+      return;
+    }
+    case 'confirm-code':
+      await confirmManualVerificationCode();
+      return;
+    case 'fill-code': {
+      const result = await runPageLearningStep(action, { code: getVerificationCode() });
+      setLearningStatus(formatActionResult(result, '验证码已填入页面。'), 'success');
+      return;
+    }
+    case 'submit-code': {
+      const result = await runPageLearningStep(action);
+      setLearningStatus(formatActionResult(result, '已提交验证码。'), 'success');
+      return;
+    }
+    case 'arm-callback':
+      await armCallbackCapture();
+      return;
+    case 'oauth-continue': {
+      // 必须先监听再点击，否则极快的本地跳转可能在监听器注册前发生。
+      await armCallbackCapture();
+      const result = await runPageLearningStep(action);
+      setLearningStatus(formatActionResult(result, '已确认 OAuth 授权，正在等待 localhost 回调。'), 'pending');
+      return;
+    }
+    default:
+      throw new Error('未知的学习步骤。');
+  }
+}
+
+async function handleLearningButtonClick(event) {
+  const action = event.currentTarget.dataset.learningAction;
+  if (!action) return;
+
+  setLearningBusy(true);
+  try {
+    await handleLearningAction(action);
+  } catch (error) {
+    setLearningStatus(error.message || '学习步骤未完成。', 'error');
+  } finally {
+    setLearningBusy(false);
+  }
+}
+
+async function clearCallbackCapture() {
+  try {
+    const state = await sendLearningMessage({ type: 'CLEAR_OPENAI_CALLBACK_CAPTURE' });
+    renderCallbackState(state);
+    setLearningStatus('已清除本次回调地址。', 'idle');
+  } catch (error) {
+    setLearningStatus(error.message || '无法清除回调地址。', 'error');
+  }
+}
+
 form.addEventListener('submit', queryAccounts);
 form.addEventListener('input', (event) => {
   if (savedFieldNames.includes(event.target.name)) {
     saveNonSensitiveFields().catch(() => {});
   }
 });
+for (const learningButton of learningButtons) {
+  learningButton.addEventListener('click', handleLearningButtonClick);
+}
+clearCallbackButton.addEventListener('click', clearCallbackCapture);
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type === 'OPENAI_CALLBACK_CAPTURED') {
+    renderCallbackState(message.state);
+  }
+});
 
 restoreSettings().catch(() => {});
+refreshCallbackState().catch(() => {});
