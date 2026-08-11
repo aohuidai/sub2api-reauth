@@ -64,6 +64,10 @@ sequenceDiagram
 5. 点击第 8 步前，service worker 把“正在监听”写入 `chrome.storage.session`；`webNavigation.onBeforeNavigate` 和 `onCommitted` 遇到 localhost 地址后写入结果。
 6. 第 10 步把第 0 步暂存在 `chrome.storage.session` 的账号、`session_id` 和 OAuth `state` 与第 9 步回调组合，调用 SUB2API 交换并更新凭据。
 
+## 完整演示
+
+[sidepanel/sidepanel.js](../sidepanel/sidepanel.js) 的 `runFullDemo` 按同一组第 0 到第 10 步函数依次调用，不另行复制页面自动化逻辑。它会在开始时一次性请求所需站点访问权限，并通过第 0 步保存的 OpenAI 标签 ID 继续执行，避免 QQ 邮箱切换标签后误操作。第 5 步没有本次验证码或第 9 步没有回调时会停止，不执行后续推送。
+
 ## 第 5 步为什么会切换标签
 
 QQ 邮箱的登录态由 Chrome 自己保存。扩展不能也不需要知道 QQ 密码：第 4 步会短暂切到已登录的邮箱标签，确保收件箱列表已打开并记录旧邮件；第 5 步在该标签页中只读取之后新出现的 OpenAI/ChatGPT 验证码，取到后自动切回第 0 到 4 步打开的 OpenAI 标签。

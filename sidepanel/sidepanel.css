@@ -200,6 +200,27 @@ h2 {
   opacity: 0.64;
 }
 
+.full-demo-button {
+  width: 100%;
+  min-height: 46px;
+  margin-top: 18px;
+  border: 1px solid var(--teal-strong);
+  border-radius: 7px;
+  background: var(--teal-strong);
+  color: #071311;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.full-demo-button:hover:not(:disabled) {
+  background: var(--teal);
+}
+
+.full-demo-button:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
 .results-header {
   justify-content: space-between;
   gap: 16px;

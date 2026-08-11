@@ -15,6 +15,7 @@ const callbackUrl = document.querySelector('#callback-url');
 const clearCallbackButton = document.querySelector('#clear-callback');
 const learningStatus = document.querySelector('#learning-status');
 const preparedAccount = document.querySelector('#prepared-account');
+const fullDemoButton = document.querySelector('#run-full-demo');
 const openAiLearningOrigins = [
   'https://*.openai.com/*',
   'https://chatgpt.com/*',
@@ -26,6 +27,9 @@ const qqMailOrigins = [
   'https://wx.mail.qq.com/*',
 ];
 const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
+const FULL_DEMO_PAGE_RETRY_COUNT = 12;
+const FULL_DEMO_PAGE_RETRY_DELAY_MS = 900;
+const FULL_DEMO_CALLBACK_TIMEOUT_MS = 45_000;
 const learningActionLabels = {
   'open-first-reauth': '第 0 步：打开重授权页',
   'fill-email': '第 1 步：填写邮箱',
@@ -41,9 +45,10 @@ const learningActionLabels = {
 };
 let latestQuery = null;
 let verificationCodeRestoreGeneration = 0;
+let fullDemoRunning = false;
 
 function setBusy(isBusy) {
-  button.disabled = isBusy;
+  button.disabled = isBusy || fullDemoRunning;
   button.textContent = isBusy ? '查询中…' : '查询账号';
 }
 
@@ -170,6 +175,10 @@ function getConnection() {
 
 async function queryAccounts(event) {
   event.preventDefault();
+  await queryReauthAccounts();
+}
+
+async function queryReauthAccounts({ throwOnError = false } = {}) {
   const connection = getConnection();
 
   setBusy(true);
@@ -209,9 +218,13 @@ async function queryAccounts(event) {
     errorState.textContent = error.message || '查询失败。';
     errorState.hidden = false;
     queryState.textContent = '查询未完成';
+    if (throwOnError) throw error;
+    return null;
   } finally {
     setBusy(false);
   }
+
+  return latestQuery;
 }
 
 function setLearningStatus(message, kind = 'idle') {
@@ -223,6 +236,8 @@ function setLearningBusy(isBusy) {
   for (const learningButton of learningButtons) {
     learningButton.disabled = isBusy;
   }
+  fullDemoButton.disabled = isBusy;
+  fullDemoButton.textContent = isBusy ? '完整演示进行中…' : '演示完整流程';
 }
 
 async function ensureOpenAiLearningPermission() {
@@ -242,6 +257,21 @@ async function ensureQqMailPermission() {
   const granted = await chrome.permissions.request({ origins: qqMailOrigins });
   if (!granted) {
     throw new Error('需要 QQ 邮箱站点访问权限才能读取验证码。');
+  }
+}
+
+async function ensureFullDemoPermissions() {
+  const origins = [...new Set([
+    getPermissionPattern(getConnection().baseUrl),
+    ...openAiLearningOrigins,
+    ...qqMailOrigins,
+  ])];
+  const hasPermission = await chrome.permissions.contains({ origins });
+  if (hasPermission) return;
+
+  const granted = await chrome.permissions.request({ origins });
+  if (!granted) {
+    throw new Error('完整演示需要 SUB2API、OpenAI、localhost 和 QQ 邮箱的站点访问权限。');
   }
 }
 
@@ -280,6 +310,7 @@ async function openFirstOpenAiReauth() {
   await saveLearningFields();
   renderPreparedAccount(result.account);
   setLearningStatus(`已打开 #${result.account.id} 的重授权页，并带入邮箱 ${result.account.email}。`, 'success');
+  return result;
 }
 
 function getVerificationCode() {
@@ -292,16 +323,17 @@ async function fetchQqOpenAiLoginCode() {
   const result = await sendLearningMessage({ type: 'FETCH_QQ_OPENAI_LOGIN_CODE' });
   if (result.needsLogin) {
     setLearningStatus('已打开 QQ 邮箱标签页，请完成 QQ 登录后回到 OpenAI 标签再点击此步骤。', 'pending');
-    return;
+    return result;
   }
   if (result.needsFreshCode) {
     setLearningStatus('为避免填入旧验证码，请在 OpenAI 页面重新发送验证码后，再点击此步骤。', 'pending');
-    return;
+    return result;
   }
 
   verificationCodeInput.value = result.code;
   await saveVerificationCode();
   setLearningStatus(`已从 QQ 邮箱取得 ${result.code.length} 位验证码，并切回 OpenAI 标签。`, 'success');
+  return result;
 }
 
 async function captureQqMailBaseline() {
@@ -322,14 +354,16 @@ async function pushReauthCallbackToSub2Api() {
     connection,
   });
   setLearningStatus(result.status || '已将重授权结果推送到 SUB2API。', 'success');
+  return result;
 }
 
-async function runPageLearningStep(action, value = {}) {
+async function runPageLearningStep(action, value = {}, { useOpenAiAuthTab = false } = {}) {
   await ensureOpenAiLearningPermission();
   return sendLearningMessage({
     type: 'RUN_OPENAI_LEARNING_STEP',
     action,
     value,
+    useOpenAiAuthTab,
   });
 }
 
@@ -359,68 +393,179 @@ async function armCallbackCapture() {
   await ensureOpenAiLearningPermission();
   const state = await sendLearningMessage({ type: 'ARM_OPENAI_CALLBACK_CAPTURE' });
   renderCallbackState(state);
+  return state;
 }
 
-async function handleLearningAction(action) {
+async function handleLearningAction(action, { useOpenAiAuthTab = false } = {}) {
   switch (action) {
     case 'open-first-reauth':
-      await openFirstOpenAiReauth();
-      return;
+      return openFirstOpenAiReauth();
     case 'fill-email': {
       await saveLearningFields();
-      const result = await runPageLearningStep(action, { email: loginEmailInput.value });
+      const result = await runPageLearningStep(action, { email: loginEmailInput.value }, { useOpenAiAuthTab });
       setLearningStatus(formatActionResult(result, '邮箱已填入页面。'), 'success');
-      return;
+      return result;
     }
     case 'continue-after-email': {
-      const result = await runPageLearningStep(action);
+      const result = await runPageLearningStep(action, {}, { useOpenAiAuthTab });
       setLearningStatus(formatActionResult(result, '已点击邮箱页的继续按钮。'), 'success');
-      return;
+      return result;
     }
     case 'fill-password': {
       await saveLearningFields();
-      const result = await runPageLearningStep(action, { password: loginPasswordInput.value });
+      const result = await runPageLearningStep(action, { password: loginPasswordInput.value }, { useOpenAiAuthTab });
       setLearningStatus(formatActionResult(result, '密码已填入页面。'), 'success');
-      return;
+      return result;
     }
     case 'continue-after-password': {
       const baseline = await captureQqMailBaseline();
-      const result = await runPageLearningStep(action);
+      const result = await runPageLearningStep(action, {}, { useOpenAiAuthTab });
       const fallback = baseline.available
         ? '已点击密码页的继续按钮。'
         : '已提交密码，但未建立 QQ 邮箱基线；请打开收件箱后重新发送验证码，再点击第 5 步。';
       setLearningStatus(formatActionResult(result, fallback), baseline.available ? 'success' : 'pending');
-      return;
+      return { baseline, result };
     }
     case 'fetch-qq-code':
-      await fetchQqOpenAiLoginCode();
-      return;
+      return fetchQqOpenAiLoginCode();
     case 'fill-code': {
-      const result = await runPageLearningStep(action, { code: getVerificationCode() });
+      const result = await runPageLearningStep(action, { code: getVerificationCode() }, { useOpenAiAuthTab });
       setLearningStatus(formatActionResult(result, '验证码已填入页面。'), 'success');
-      return;
+      return result;
     }
     case 'submit-code': {
-      const result = await runPageLearningStep(action);
+      const result = await runPageLearningStep(action, {}, { useOpenAiAuthTab });
       await clearVerificationCode();
       setLearningStatus(formatActionResult(result, '已提交验证码。'), 'success');
-      return;
+      return result;
     }
     case 'arm-callback':
-      await armCallbackCapture();
-      return;
+      return armCallbackCapture();
     case 'oauth-continue': {
       // 必须先监听再点击，否则极快的本地跳转可能在监听器注册前发生。
       await armCallbackCapture();
-      const result = await runPageLearningStep(action);
+      const result = await runPageLearningStep(action, {}, { useOpenAiAuthTab });
       setLearningStatus(formatActionResult(result, '已确认 OAuth 授权，正在等待 localhost 回调。'), 'pending');
-      return;
+      return result;
     }
     case 'push-callback':
-      await pushReauthCallbackToSub2Api();
-      return;
+      return pushReauthCallbackToSub2Api();
     default:
       throw new Error('未知的学习步骤。');
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableDemoError(error) {
+  return /无法连接当前页面|当前页面没有可见|未找到.*(?:输入框|继续|提交|授权)|页面步骤未完成/i.test(
+    String(error?.message || error || '')
+  );
+}
+
+async function runFullDemoStep(step, action, options = {}) {
+  const {
+    retry = false,
+    pauseAfterMs = 0,
+  } = options;
+  const attempts = retry ? FULL_DEMO_PAGE_RETRY_COUNT : 1;
+  const label = learningActionLabels[action] || `第 ${step} 步`;
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    setLearningStatus(
+      `完整演示：正在执行第 ${step} 步 ${label}${attempts > 1 ? `（${attempt}/${attempts}）` : ''}…`,
+      'pending'
+    );
+    try {
+      const result = await handleLearningAction(action, {
+        useOpenAiAuthTab: step > 0 && step < 9,
+      });
+      if (pauseAfterMs) await sleep(pauseAfterMs);
+      return result;
+    } catch (error) {
+      lastError = error;
+      if (!retry || !isRetryableDemoError(error) || attempt === attempts) break;
+      await sleep(FULL_DEMO_PAGE_RETRY_DELAY_MS);
+    }
+  }
+
+  throw lastError || new Error(`第 ${step} 步未完成。`);
+}
+
+async function waitForFullDemoCallback() {
+  const deadline = Date.now() + FULL_DEMO_CALLBACK_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const state = await sendLearningMessage({ type: 'GET_OPENAI_CALLBACK_CAPTURE' });
+    if (state.callbackUrl) {
+      renderCallbackState(state);
+      return state;
+    }
+    setLearningStatus('完整演示：第 9 步正在等待 localhost 回调地址…', 'pending');
+    await sleep(1_000);
+  }
+  throw new Error('完整演示停在第 9 步：等待 localhost 回调超时。');
+}
+
+function setFullDemoBusy(isBusy) {
+  fullDemoRunning = isBusy;
+  setLearningBusy(isBusy);
+  for (const element of form.querySelectorAll('input, button')) {
+    element.disabled = isBusy;
+  }
+  setBusy(false);
+}
+
+async function runFullDemo() {
+  setFullDemoBusy(true);
+  try {
+    setLearningStatus('完整演示：正在检查站点访问权限…', 'pending');
+    await ensureFullDemoPermissions();
+    await clearVerificationCode();
+    const clearedCallback = await sendLearningMessage({ type: 'CLEAR_OPENAI_CALLBACK_CAPTURE' });
+    renderCallbackState(clearedCallback);
+
+    if (!latestQuery) {
+      setLearningStatus('完整演示：正在查询待重授权账号…', 'pending');
+      await queryReauthAccounts({ throwOnError: true });
+    }
+    if (!latestQuery?.accounts?.[0]) {
+      throw new Error('完整演示无法开始：查询结果中没有待重授权账号。');
+    }
+
+    await runFullDemoStep(0, 'open-first-reauth', { pauseAfterMs: 1_200 });
+    await runFullDemoStep(1, 'fill-email', { retry: true });
+    await runFullDemoStep(2, 'continue-after-email', { retry: true, pauseAfterMs: 1_000 });
+    await runFullDemoStep(3, 'fill-password', { retry: true });
+    const passwordResult = await runFullDemoStep(4, 'continue-after-password', {
+      retry: true,
+      pauseAfterMs: 1_000,
+    });
+    if (!passwordResult?.baseline?.available) {
+      throw new Error('完整演示停在第 4 步：QQ 收件箱未就绪，无法建立本次验证码的邮件快照。');
+    }
+
+    const codeResult = await runFullDemoStep(5, 'fetch-qq-code');
+    if (codeResult?.needsLogin) {
+      throw new Error('完整演示停在第 5 步：请先登录 QQ 邮箱后重新开始。');
+    }
+    if (codeResult?.needsFreshCode || !getVerificationCode()) {
+      throw new Error('完整演示停在第 5 步：未获取到本次验证码，请重新发送验证码后再开始。');
+    }
+
+    await runFullDemoStep(6, 'fill-code', { retry: true });
+    await runFullDemoStep(7, 'submit-code', { retry: true, pauseAfterMs: 1_000 });
+    await runFullDemoStep(8, 'oauth-continue', { retry: true });
+    await waitForFullDemoCallback();
+    await runFullDemoStep(10, 'push-callback');
+    setLearningStatus('完整演示已完成：重授权结果已推送到 SUB2API。', 'success');
+  } catch (error) {
+    console.error('[sub2api reauth] 完整演示失败：', error);
+    setLearningStatus(error.message || '完整演示未完成。', 'error');
+  } finally {
+    setFullDemoBusy(false);
   }
 }
 
@@ -461,6 +606,7 @@ form.addEventListener('input', (event) => {
 loginEmailInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
 loginPasswordInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
 verificationCodeInput.addEventListener('input', () => saveVerificationCode().catch(() => {}));
+fullDemoButton.addEventListener('click', runFullDemo);
 for (const learningButton of learningButtons) {
   learningButton.addEventListener('click', handleLearningButtonClick);
 }

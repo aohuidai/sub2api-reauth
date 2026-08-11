@@ -188,6 +188,60 @@ test('service worker generates and opens the selected account reauthorization UR
   }
 });
 
+test('service worker keeps full-demo page actions on the prepared OpenAI tab', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const injected = [];
+  const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      query: async () => {
+        assert.fail('the full demo should use the stored OpenAI tab instead of the active tab');
+      },
+      sendMessage: async (tabId, message) => {
+        assert.equal(tabId, 42);
+        assert.deepEqual(message, {
+          type: 'RUN_OPENAI_LEARNING_STEP',
+          action: 'fill-email',
+          value: { email: 'target@example.com' },
+        });
+        return { ok: true, result: { action: 'email-filled' } };
+      },
+    },
+    scripting: {
+      executeScript: async (details) => injected.push(details),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-stored-auth-tab`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'RUN_OPENAI_LEARNING_STEP',
+      action: 'fill-email',
+      value: { email: 'target@example.com' },
+      useOpenAiAuthTab: true,
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(injected, [{
+      target: { tabId: 42 },
+      files: ['content/openai-login-learning.js'],
+    }]);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test('service worker snapshots QQ inbox IDs, then polls only with that baseline', async () => {
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;

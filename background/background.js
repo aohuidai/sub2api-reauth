@@ -123,7 +123,8 @@ async function runOpenAiLearningStep(message = {}) {
     throw new Error('未知的学习步骤。');
   }
 
-  const tabId = await getActiveTabId();
+  const storedAuthTabId = message.useOpenAiAuthTab ? await getOpenAiAuthTabId() : null;
+  const tabId = storedAuthTabId || await getActiveTabId();
   await setOpenAiAuthTabId(tabId);
   try {
     // 内容脚本只在用户主动操作时注入，避免在不相关网页运行。

@@ -208,3 +208,107 @@ test('side panel restores a temporary QQ verification code without reviving a cl
   assert.equal(verificationCodeInput.value, '');
   assert.deepEqual(removed, [QQ_VERIFICATION_CODE_STORAGE_KEY]);
 });
+
+test('full demo runs the existing learning actions in order and pushes the callback result last', async () => {
+  const steps = [];
+  const statuses = [];
+  const api = new Function(
+    'setFullDemoBusy',
+    'setLearningStatus',
+    'ensureFullDemoPermissions',
+    'clearVerificationCode',
+    'sendLearningMessage',
+    'renderCallbackState',
+    'latestQuery',
+    'queryReauthAccounts',
+    'runFullDemoStep',
+    'getVerificationCode',
+    'waitForFullDemoCallback',
+    'console',
+    `
+      ${extractAsyncFunction('runFullDemo')}
+      return { runFullDemo };
+    `
+  )(
+    () => {},
+    (message, kind) => statuses.push({ message, kind }),
+    async () => {},
+    async () => {},
+    async () => ({}),
+    () => {},
+    { accounts: [{ id: 10 }] },
+    async () => { throw new Error('query should not run'); },
+    async (step, action) => {
+      steps.push([step, action]);
+      if (action === 'continue-after-password') return { baseline: { available: true } };
+      if (action === 'fetch-qq-code') return { code: '111111' };
+      return {};
+    },
+    () => '111111',
+    async () => ({ callbackUrl: 'http://localhost:1455/auth/callback?code=test' }),
+    { error() {} }
+  );
+
+  await api.runFullDemo();
+
+  assert.deepEqual(steps, [
+    [0, 'open-first-reauth'],
+    [1, 'fill-email'],
+    [2, 'continue-after-email'],
+    [3, 'fill-password'],
+    [4, 'continue-after-password'],
+    [5, 'fetch-qq-code'],
+    [6, 'fill-code'],
+    [7, 'submit-code'],
+    [8, 'oauth-continue'],
+    [10, 'push-callback'],
+  ]);
+  assert.match(statuses.at(-1).message, /完整演示已完成/);
+});
+
+test('full demo stops after the QQ code step when no fresh code is available', async () => {
+  const steps = [];
+  const statuses = [];
+  const api = new Function(
+    'setFullDemoBusy',
+    'setLearningStatus',
+    'ensureFullDemoPermissions',
+    'clearVerificationCode',
+    'sendLearningMessage',
+    'renderCallbackState',
+    'latestQuery',
+    'queryReauthAccounts',
+    'runFullDemoStep',
+    'getVerificationCode',
+    'waitForFullDemoCallback',
+    'console',
+    `
+      ${extractAsyncFunction('runFullDemo')}
+      return { runFullDemo };
+    `
+  )(
+    () => {},
+    (message, kind) => statuses.push({ message, kind }),
+    async () => {},
+    async () => {},
+    async () => ({}),
+    () => {},
+    { accounts: [{ id: 10 }] },
+    async () => { throw new Error('query should not run'); },
+    async (step, action) => {
+      steps.push([step, action]);
+      if (action === 'continue-after-password') return { baseline: { available: true } };
+      if (action === 'fetch-qq-code') return { needsFreshCode: true };
+      return {};
+    },
+    () => '',
+    async () => { throw new Error('callback should not be read'); },
+    { error() {} }
+  );
+
+  await api.runFullDemo();
+
+  assert.deepEqual(steps.at(-1), [5, 'fetch-qq-code']);
+  assert.match(statuses.at(-1).message, /停在第 5 步/);
+  assert.equal(statuses.at(-1).kind, 'error');
+});
