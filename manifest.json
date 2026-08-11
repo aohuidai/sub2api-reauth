@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "sub2api reoauth",
-  "version": "0.5.0",
+  "version": "0.4.0",
   "description": "查询待重授权账号并学习 OpenAI OAuth 登录流程",
   "permissions": [
+    "sidePanel",
     "storage",
     "scripting",
     "tabs",
@@ -17,8 +18,10 @@
     "service_worker": "background/background.js",
     "type": "module"
   },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
   "action": {
-    "default_title": "打开 sub2api reoauth",
-    "default_popup": "popup/popup.html"
+    "default_title": "打开 sub2api reoauth"
   }
 }

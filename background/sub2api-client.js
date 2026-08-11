@@ -429,7 +429,7 @@ export function createSub2ApiClient({ fetchImpl = globalThis.fetch, timeoutMs = 
 
   /**
    * FlowPilot 对应 prepareFirstOpenAiAccountReauth 的“生成链接”部分。
-   * 候选账号已经由扩展界面上一次查询选出，因此这里不重新扫描分组。
+   * 候选账号已经由侧边栏上一次查询选出，因此这里不重新扫描分组。
    */
   async function prepareReauthForAccount(connection = {}, account = {}) {
     const accountId = normalizeOptionalPositiveId(account.id);
