@@ -23,15 +23,17 @@
 2. `GET /api/v1/admin/groups/all`
 3. `GET /api/v1/admin/accounts?...`
 
-第 0 步会额外调用 `POST /api/v1/admin/openai/generate-auth-url`，为已选账号创建一次临时 OAuth 授权会话。它不会交换授权码、更新账号、删除账号或清除错误状态。扩展只保存地址、管理员账号和分组；管理员密码仅保留在当前侧边栏页面内，不写入 Chrome 存储。
+第 0 步会额外调用 `POST /api/v1/admin/openai/generate-auth-url`，为已选账号创建一次临时 OAuth 授权会话。它不会交换授权码、更新账号、删除账号或清除错误状态。SUB2API 管理员密码和 OpenAI 密码会保存到本机当前 Chrome 配置中，方便学习时重开侧边栏继续操作。
 
 分组匹配会先尝试 `platform=openai` 的列表，再回退到完整分组列表，并兼容数组、`items`、`groups` 等返回结构。找不到时，错误信息会显示接口实际返回的前 20 个分组名。
 
 ## OpenAI 学习流程
 
-先在上方完成 SUB2API 查询。第 0 步会使用结果中的第一个账号生成对应的 OAuth 重授权 URL，并在新标签页打开；之后从步骤 1 到 9 按顺序操作。扩展会在当前标签页中填写和点击，不会自行登录邮箱。
+先在上方完成 SUB2API 查询。第 0 步会使用结果中的第一个账号生成对应的 OAuth 重授权 URL，并在新标签页打开；之后从步骤 1 到 10 按顺序操作。扩展会在当前标签页中填写和点击，不会自行登录邮箱。
 
-邮箱、密码、验证码不会写入 Chrome 存储；关闭侧边栏即会丢失。localhost 回调地址会放在 `chrome.storage.session`，仅在本次浏览器会话中保留，方便你复制；回调中可能含有一次性授权信息，使用完应点击“清除”。
+第 4 步会先切到已登录的 QQ 邮箱标签，必要时从邮件详情页进入收件箱，并记录当时已有邮件的 ID；随后切回 OpenAI 页面提交密码。第 5 步只接受这份快照之后新到达的 OpenAI/ChatGPT 邮件，因此不会把旧验证码填回页面。若第 4 步未能建立快照，需在 QQ 收件箱就绪后重新发送 OpenAI 验证码。
+
+验证码和 localhost 回调地址会放在 `chrome.storage.session`，只在本次浏览器会话中保留；关闭并重开侧边栏时验证码仍会恢复。回调中可能含有一次性授权信息，使用完应点击“清除”。
 
 完整的原项目函数对照和每一步说明见 [docs/flowpilot-openai-login-map.md](docs/flowpilot-openai-login-map.md)。
 
@@ -39,11 +41,12 @@
 
 ```text
 manifest.json                     MV3 入口、动态注入和导航监听权限
-sidepanel/                        查询界面与第 0 到 9 步学习界面
+sidepanel/                        查询界面与第 0 到 10 步学习界面
 background/background.js          service worker：消息路由、重授权页打开、内容脚本注入、回调监听
 background/sub2api-client.js      SUB2API 查询、候选账号重授权 URL 生成
 background/openai-learning.js     可测试的验证码适配器和 localhost 回调边界
 content/openai-login-learning.js  当前 OpenAI 页面上的 DOM 查找、填写和点击
+content/qq-mail-learning.js       QQ 收件箱准备、旧邮件快照与本次验证码轮询
 docs/                             FlowPilot 原函数到教学版函数的对照
 test/                             纯 Node 单元测试
 ```

@@ -197,3 +197,82 @@ test('generates a reauthorization URL for the selected first account without upd
   assert.equal(calls.some((call) => call.method === 'PUT'), false);
   assert.equal(calls.some((call) => call.path.endsWith('/clear-error')), false);
 });
+
+test('exchanges a localhost callback and updates only the original OAuth account', async () => {
+  const calls = [];
+  let updateBody = null;
+  const client = createSub2ApiClient({
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url);
+      const body = options.body ? JSON.parse(options.body) : null;
+      calls.push({ path: parsed.pathname, method: options.method || 'GET', body });
+
+      if (parsed.pathname === '/api/v1/auth/login') {
+        return jsonResponse({ code: 0, data: { access_token: 'admin-token' } });
+      }
+      if (parsed.pathname === '/api/v1/admin/accounts/10' && (options.method || 'GET') === 'GET') {
+        return jsonResponse({
+          code: 0,
+          data: {
+            id: 10,
+            name: 'target@example.com',
+            platform: 'openai',
+            type: 'oauth',
+            group_ids: [26],
+            proxy_id: 8,
+            credentials: { email: 'target@example.com', access_token: 'old-token' },
+            extra: { original: true },
+          },
+        });
+      }
+      if (parsed.pathname === '/api/v1/admin/openai/exchange-code') {
+        assert.deepEqual(body, {
+          session_id: 'reauth-session',
+          code: 'callback-code',
+          state: 'reauth-state',
+          redirect_uri: 'http://localhost:1455/auth/callback',
+          proxy_id: 8,
+        });
+        return jsonResponse({
+          code: 0,
+          data: {
+            access_token: 'new-token',
+            refresh_token: 'new-refresh-token',
+            email: 'target@example.com',
+            expires_in: 3600,
+          },
+        });
+      }
+      if (parsed.pathname === '/api/v1/admin/accounts/10' && options.method === 'PUT') {
+        updateBody = body;
+        return jsonResponse({ code: 0, data: { id: 10 } });
+      }
+      if (parsed.pathname === '/api/v1/admin/accounts/10/clear-error') {
+        return jsonResponse({ code: 0, data: {} });
+      }
+      return jsonResponse({ code: 1, message: 'Unexpected request' }, 404);
+    },
+  });
+
+  const result = await client.submitReauthCallback({
+    baseUrl: 'http://localhost:8080/admin/accounts',
+    email: 'admin@sub2api.local',
+    password: 'not-stored',
+  }, {
+    account: { id: 10, email: 'target@example.com', proxyId: 8 },
+    sessionId: 'reauth-session',
+    oauthState: 'reauth-state',
+    redirectUri: 'http://localhost:1455/auth/callback',
+  }, 'http://localhost:1455/auth/callback?code=callback-code&state=reauth-state');
+
+  assert.equal(result.accountId, 10);
+  assert.equal(result.email, 'target@example.com');
+  assert.match(result.status, /已重授权账号 #10/);
+  assert.equal(Object.hasOwn(result, 'updatedAccount'), false);
+  assert.equal(updateBody.credentials.access_token, 'new-token');
+  assert.equal(updateBody.credentials.refresh_token, 'new-refresh-token');
+  assert.equal(updateBody.credentials.auth_mode, 'oauth');
+  assert.equal(updateBody.extra.reauth_mode, 'oauth');
+  assert.deepEqual(updateBody.group_ids, [26]);
+  assert.equal(calls.some((call) => call.path.endsWith('/clear-error')), true);
+});

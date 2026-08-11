@@ -108,6 +108,90 @@ function normalizeOAuthUrl(value = '') {
   }
 }
 
+function parseReauthCallback(value = '') {
+  let url;
+  try {
+    url = new URL(String(value || ''));
+  } catch {
+    throw createRequestError('localhost 回调地址无效。', 400);
+  }
+
+  if (!['http:', 'https:'].includes(url.protocol) || url.hostname.toLowerCase() !== 'localhost') {
+    throw createRequestError('回调地址必须是 http(s)://localhost/...。', 400);
+  }
+
+  const code = normalizeString(url.searchParams.get('code'));
+  const state = normalizeString(url.searchParams.get('state'));
+  if (!code || !state) {
+    throw createRequestError('localhost 回调地址缺少 code 或 state。', 400);
+  }
+  return { url: url.toString(), code, state };
+}
+
+function mergeOpenAiOAuthCredentials(oldCredentials = {}, exchangeData = {}) {
+  const credentials = {
+    ...(oldCredentials && typeof oldCredentials === 'object' ? oldCredentials : {}),
+  };
+  const allowedKeys = [
+    'access_token',
+    'refresh_token',
+    'id_token',
+    'expires_at',
+    'expires_in',
+    'email',
+    'chatgpt_account_id',
+    'chatgpt_user_id',
+    'organization_id',
+    'plan_type',
+    'client_id',
+  ];
+
+  for (const key of allowedKeys) {
+    if (exchangeData?.[key] !== undefined && exchangeData?.[key] !== null && exchangeData[key] !== '') {
+      credentials[key] = exchangeData[key];
+    }
+  }
+  if (exchangeData?.expires_in && !exchangeData?.expires_at) {
+    credentials.expires_at = Math.floor(Date.now() / 1000) + Number(exchangeData.expires_in);
+  }
+  credentials.auth_mode = 'oauth';
+
+  if (!credentials.access_token) {
+    throw createRequestError('SUB2API 交换授权码后未返回 access_token。', 502);
+  }
+  return credentials;
+}
+
+function buildReauthExtra(oldExtra = {}, exchangeData = {}) {
+  return {
+    ...(oldExtra && typeof oldExtra === 'object' && !Array.isArray(oldExtra) ? oldExtra : {}),
+    ...(exchangeData?.privacy_mode ? { privacy_mode: exchangeData.privacy_mode } : {}),
+    reauth_mode: 'oauth',
+    reauthorized_at: new Date().toISOString(),
+  };
+}
+
+function buildAccountUpdatePayload(account = {}, credentials = {}, extra = {}) {
+  const payload = {
+    name: account.name,
+    notes: account.notes,
+    platform: account.platform || 'openai',
+    provider: account.provider || '',
+    type: account.type || 'oauth',
+    credentials,
+    extra,
+    proxy_id: account.proxy_id,
+    concurrency: account.concurrency,
+    load_factor: account.load_factor,
+    priority: account.priority,
+    rate_multiplier: account.rate_multiplier,
+    auto_pause_on_expired: account.auto_pause_on_expired,
+    expires_at: account.expires_at,
+  };
+  if (Array.isArray(account.group_ids)) payload.group_ids = account.group_ids;
+  return Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined));
+}
+
 function getAccountEmail(account = {}) {
   return normalizeEmail(account?.credentials?.email)
     || normalizeEmail(account?.email)
@@ -386,8 +470,75 @@ export function createSub2ApiClient({ fetchImpl = globalThis.fetch, timeoutMs = 
     };
   }
 
+  /**
+   * FlowPilot 对应 submitOpenAiAccountReauthCallback。
+   * 仅在用户明确点击第 10 步时交换 code、更新原账号并清除错误状态。
+   */
+  async function submitReauthCallback(connection = {}, reauthContext = {}, localhostUrl = '') {
+    const callback = parseReauthCallback(localhostUrl);
+    const accountId = normalizeOptionalPositiveId(reauthContext?.account?.id);
+    const sessionId = normalizeString(reauthContext?.sessionId);
+    const expectedState = normalizeString(reauthContext?.oauthState);
+    const redirectUri = normalizeString(reauthContext?.redirectUri || DEFAULT_REAUTH_REDIRECT_URI);
+    const proxyId = normalizeOptionalPositiveId(reauthContext?.account?.proxyId);
+
+    if (!accountId) {
+      throw createRequestError('缺少待重授权的 SUB2API 账号 ID，请重新执行第 0 步。', 400);
+    }
+    if (!sessionId) {
+      throw createRequestError('缺少重授权 session_id，请重新执行第 0 步。', 400);
+    }
+    if (expectedState && callback.state !== expectedState) {
+      throw createRequestError('回调 state 与第 0 步生成的 OAuth state 不一致，请重新开始。', 400);
+    }
+
+    const { origin, token } = await login(connection);
+    const account = await requestJson(origin, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, { token });
+    if (!isOpenAiOAuthAccount(account)) {
+      throw createRequestError(`SUB2API 账号 #${accountId} 不是 OpenAI OAuth 账号。`, 400);
+    }
+
+    const exchangeBody = {
+      session_id: sessionId,
+      code: callback.code,
+      state: callback.state,
+      redirect_uri: redirectUri,
+    };
+    if (proxyId) exchangeBody.proxy_id = proxyId;
+
+    const exchangeData = await requestJson(origin, '/api/v1/admin/openai/exchange-code', {
+      method: 'POST',
+      token,
+      body: exchangeBody,
+    });
+    const credentials = mergeOpenAiOAuthCredentials(account.credentials, exchangeData);
+    const extra = buildReauthExtra(account.extra, exchangeData);
+    const payload = buildAccountUpdatePayload(account, credentials, extra);
+    await requestJson(origin, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}`, {
+      method: 'PUT',
+      token,
+      body: payload,
+    });
+
+    // 与 FlowPilot 一致：令牌更新成功后尽力清除旧错误；清除失败不回滚更新。
+    await requestJson(origin, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/clear-error`, {
+      method: 'POST',
+      token,
+      body: {},
+    }).catch(() => {});
+
+    const email = getAccountEmail({ ...account, credentials });
+    return {
+      localhostUrl: callback.url,
+      accountId,
+      email,
+      status: `SUB2API 已重授权账号 #${accountId}${email ? `（${email}）` : ''}`,
+    };
+  }
+
   return {
     prepareReauthForAccount,
     queryReauthCandidates,
+    submitReauthCallback,
   };
 }

@@ -5,7 +5,8 @@ const queryState = document.querySelector('#query-state');
 const errorState = document.querySelector('#error-state');
 const tableWrap = document.querySelector('#results-table-wrap');
 const resultsBody = document.querySelector('#results-body');
-const savedFieldNames = ['baseUrl', 'email', 'groupName'];
+const savedConnectionFieldNames = ['baseUrl', 'email', 'password', 'groupName'];
+const savedLearningFieldNames = ['loginEmail', 'loginPassword'];
 const learningButtons = Array.from(document.querySelectorAll('[data-learning-action]'));
 const loginEmailInput = document.querySelector('#login-email');
 const loginPasswordInput = document.querySelector('#login-password');
@@ -20,7 +21,26 @@ const openAiLearningOrigins = [
   'http://localhost/*',
   'https://localhost/*',
 ];
+const qqMailOrigins = [
+  'https://mail.qq.com/*',
+  'https://wx.mail.qq.com/*',
+];
+const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
+const learningActionLabels = {
+  'open-first-reauth': '第 0 步：打开重授权页',
+  'fill-email': '第 1 步：填写邮箱',
+  'continue-after-email': '第 2 步：继续',
+  'fill-password': '第 3 步：填写密码',
+  'continue-after-password': '第 4 步：继续',
+  'fetch-qq-code': '第 5 步：从 QQ 邮箱获取验证码',
+  'fill-code': '第 6 步：填写验证码',
+  'submit-code': '第 7 步：继续',
+  'oauth-continue': '第 8 步：确认 OAuth 授权',
+  'arm-callback': '第 9 步：开始监听回调',
+  'push-callback': '第 10 步：推送重授权结果',
+};
 let latestQuery = null;
+let verificationCodeRestoreGeneration = 0;
 
 function setBusy(isBusy) {
   button.disabled = isBusy;
@@ -86,29 +106,71 @@ async function ensureHostPermission(baseUrl) {
 }
 
 async function restoreSettings() {
-  const saved = await chrome.storage.local.get(savedFieldNames);
-  for (const fieldName of savedFieldNames) {
+  const saved = await chrome.storage.local.get([
+    ...savedConnectionFieldNames,
+    ...savedLearningFieldNames,
+  ]);
+  for (const fieldName of savedConnectionFieldNames) {
     const input = form.elements.namedItem(fieldName);
-    if (input && saved[fieldName]) input.value = saved[fieldName];
+    if (input && Object.hasOwn(saved, fieldName)) input.value = saved[fieldName];
+  }
+  if (Object.hasOwn(saved, 'loginEmail')) loginEmailInput.value = saved.loginEmail;
+  if (Object.hasOwn(saved, 'loginPassword')) loginPasswordInput.value = saved.loginPassword;
+}
+
+async function restoreVerificationCode() {
+  const generation = verificationCodeRestoreGeneration;
+  const stored = await chrome.storage.session.get(QQ_VERIFICATION_CODE_STORAGE_KEY);
+  if (generation === verificationCodeRestoreGeneration && stored[QQ_VERIFICATION_CODE_STORAGE_KEY]) {
+    verificationCodeInput.value = stored[QQ_VERIFICATION_CODE_STORAGE_KEY];
   }
 }
 
-async function saveNonSensitiveFields() {
+async function saveConnectionFields() {
   const values = new FormData(form);
-  await chrome.storage.local.set(Object.fromEntries(
-    savedFieldNames.map((name) => [name, String(values.get(name) || '').trim()])
-  ));
+  await chrome.storage.local.set({
+    baseUrl: String(values.get('baseUrl') || '').trim(),
+    email: String(values.get('email') || '').trim(),
+    password: String(values.get('password') || ''),
+    groupName: String(values.get('groupName') || '').trim(),
+  });
 }
 
-async function queryAccounts(event) {
-  event.preventDefault();
+async function saveLearningFields() {
+  await chrome.storage.local.set({
+    loginEmail: String(loginEmailInput.value || '').trim(),
+    loginPassword: String(loginPasswordInput.value || ''),
+  });
+}
+
+async function saveVerificationCode() {
+  const code = String(verificationCodeInput.value || '').replace(/\s+/g, '');
+  if (code) {
+    await chrome.storage.session.set({ [QQ_VERIFICATION_CODE_STORAGE_KEY]: code });
+    return;
+  }
+  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_STORAGE_KEY);
+}
+
+async function clearVerificationCode() {
+  verificationCodeRestoreGeneration += 1;
+  verificationCodeInput.value = '';
+  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_STORAGE_KEY);
+}
+
+function getConnection() {
   const values = new FormData(form);
-  const connection = {
+  return {
     baseUrl: String(values.get('baseUrl') || '').trim(),
     email: String(values.get('email') || '').trim(),
     password: String(values.get('password') || ''),
     groupName: String(values.get('groupName') || '').trim(),
   };
+}
+
+async function queryAccounts(event) {
+  event.preventDefault();
+  const connection = getConnection();
 
   setBusy(true);
   errorState.hidden = true;
@@ -119,7 +181,7 @@ async function queryAccounts(event) {
 
   try {
     await ensureHostPermission(connection.baseUrl);
-    await saveNonSensitiveFields();
+    await saveConnectionFields();
     const response = await chrome.runtime.sendMessage({
       type: 'QUERY_REAUTH_CANDIDATES',
       connection,
@@ -173,8 +235,28 @@ async function ensureOpenAiLearningPermission() {
   }
 }
 
+async function ensureQqMailPermission() {
+  const hasPermission = await chrome.permissions.contains({ origins: qqMailOrigins });
+  if (hasPermission) return;
+
+  const granted = await chrome.permissions.request({ origins: qqMailOrigins });
+  if (!granted) {
+    throw new Error('需要 QQ 邮箱站点访问权限才能读取验证码。');
+  }
+}
+
 async function sendLearningMessage(message) {
-  const response = await chrome.runtime.sendMessage(message);
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    const detail = String(error?.message || error || '').trim();
+    const suffix = detail ? `：${detail}` : '';
+    throw new Error(`无法连接扩展后台${suffix}。请在 chrome://extensions 重新加载 “sub2api reoauth” 后重试。`);
+  }
+  if (!response) {
+    throw new Error('扩展后台没有返回。请在 chrome://extensions 重新加载 “sub2api reoauth” 后重试。');
+  }
   if (!response?.ok) {
     throw new Error(response?.error || '学习步骤未完成。');
   }
@@ -195,6 +277,7 @@ async function openFirstOpenAiReauth() {
   });
 
   loginEmailInput.value = result.account.email;
+  await saveLearningFields();
   renderPreparedAccount(result.account);
   setLearningStatus(`已打开 #${result.account.id} 的重授权页，并带入邮箱 ${result.account.email}。`, 'success');
 }
@@ -203,13 +286,42 @@ function getVerificationCode() {
   return String(verificationCodeInput.value || '').replace(/\s+/g, '');
 }
 
-async function confirmManualVerificationCode() {
-  const result = await sendLearningMessage({
-    type: 'CONFIRM_MANUAL_VERIFICATION_CODE',
-    code: getVerificationCode(),
-  });
+async function fetchQqOpenAiLoginCode() {
+  await clearVerificationCode();
+  await ensureQqMailPermission();
+  const result = await sendLearningMessage({ type: 'FETCH_QQ_OPENAI_LOGIN_CODE' });
+  if (result.needsLogin) {
+    setLearningStatus('已打开 QQ 邮箱标签页，请完成 QQ 登录后回到 OpenAI 标签再点击此步骤。', 'pending');
+    return;
+  }
+  if (result.needsFreshCode) {
+    setLearningStatus('为避免填入旧验证码，请在 OpenAI 页面重新发送验证码后，再点击此步骤。', 'pending');
+    return;
+  }
+
   verificationCodeInput.value = result.code;
-  setLearningStatus(`已确认 ${result.code.length} 位验证码；下一步可填入页面。`, 'success');
+  await saveVerificationCode();
+  setLearningStatus(`已从 QQ 邮箱取得 ${result.code.length} 位验证码，并切回 OpenAI 标签。`, 'success');
+}
+
+async function captureQqMailBaseline() {
+  try {
+    await ensureQqMailPermission();
+    return await sendLearningMessage({ type: 'SNAPSHOT_QQ_MAIL_BASELINE' });
+  } catch (error) {
+    return { available: false, error: String(error?.message || 'QQ 邮箱基线获取失败。') };
+  }
+}
+
+async function pushReauthCallbackToSub2Api() {
+  const connection = getConnection();
+  await ensureHostPermission(connection.baseUrl);
+  await saveConnectionFields();
+  const result = await sendLearningMessage({
+    type: 'SUBMIT_OPENAI_REAUTH_CALLBACK',
+    connection,
+  });
+  setLearningStatus(result.status || '已将重授权结果推送到 SUB2API。', 'success');
 }
 
 async function runPageLearningStep(action, value = {}) {
@@ -255,6 +367,7 @@ async function handleLearningAction(action) {
       await openFirstOpenAiReauth();
       return;
     case 'fill-email': {
+      await saveLearningFields();
       const result = await runPageLearningStep(action, { email: loginEmailInput.value });
       setLearningStatus(formatActionResult(result, '邮箱已填入页面。'), 'success');
       return;
@@ -265,17 +378,22 @@ async function handleLearningAction(action) {
       return;
     }
     case 'fill-password': {
+      await saveLearningFields();
       const result = await runPageLearningStep(action, { password: loginPasswordInput.value });
       setLearningStatus(formatActionResult(result, '密码已填入页面。'), 'success');
       return;
     }
     case 'continue-after-password': {
+      const baseline = await captureQqMailBaseline();
       const result = await runPageLearningStep(action);
-      setLearningStatus(formatActionResult(result, '已点击密码页的继续按钮。'), 'success');
+      const fallback = baseline.available
+        ? '已点击密码页的继续按钮。'
+        : '已提交密码，但未建立 QQ 邮箱基线；请打开收件箱后重新发送验证码，再点击第 5 步。';
+      setLearningStatus(formatActionResult(result, fallback), baseline.available ? 'success' : 'pending');
       return;
     }
-    case 'confirm-code':
-      await confirmManualVerificationCode();
+    case 'fetch-qq-code':
+      await fetchQqOpenAiLoginCode();
       return;
     case 'fill-code': {
       const result = await runPageLearningStep(action, { code: getVerificationCode() });
@@ -284,6 +402,7 @@ async function handleLearningAction(action) {
     }
     case 'submit-code': {
       const result = await runPageLearningStep(action);
+      await clearVerificationCode();
       setLearningStatus(formatActionResult(result, '已提交验证码。'), 'success');
       return;
     }
@@ -297,6 +416,9 @@ async function handleLearningAction(action) {
       setLearningStatus(formatActionResult(result, '已确认 OAuth 授权，正在等待 localhost 回调。'), 'pending');
       return;
     }
+    case 'push-callback':
+      await pushReauthCallbackToSub2Api();
+      return;
     default:
       throw new Error('未知的学习步骤。');
   }
@@ -306,10 +428,14 @@ async function handleLearningButtonClick(event) {
   const action = event.currentTarget.dataset.learningAction;
   if (!action) return;
 
+  const actionLabel = learningActionLabels[action] || action;
+  setLearningStatus(`正在执行：${actionLabel}…`, 'pending');
+  console.info(`[sub2api reauth] 开始执行：${action}`);
   setLearningBusy(true);
   try {
     await handleLearningAction(action);
   } catch (error) {
+    console.error(`[sub2api reauth] 执行失败：${action}`, error);
     setLearningStatus(error.message || '学习步骤未完成。', 'error');
   } finally {
     setLearningBusy(false);
@@ -330,10 +456,11 @@ form.addEventListener('submit', queryAccounts);
 form.addEventListener('input', (event) => {
   latestQuery = null;
   renderPreparedAccount();
-  if (savedFieldNames.includes(event.target.name)) {
-    saveNonSensitiveFields().catch(() => {});
-  }
+  if (savedConnectionFieldNames.includes(event.target.name)) saveConnectionFields().catch(() => {});
 });
+loginEmailInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
+loginPasswordInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
+verificationCodeInput.addEventListener('input', () => saveVerificationCode().catch(() => {}));
 for (const learningButton of learningButtons) {
   learningButton.addEventListener('click', handleLearningButtonClick);
 }
@@ -345,4 +472,5 @@ chrome.runtime.onMessage.addListener((message) => {
 });
 
 restoreSettings().catch(() => {});
+restoreVerificationCode().catch(() => {});
 refreshCallbackState().catch(() => {});

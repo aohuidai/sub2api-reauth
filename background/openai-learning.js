@@ -21,8 +21,9 @@ export function normalizeVerificationCode(value = '') {
 /**
  * FlowPilot 对应函数：background/verification-flow.js 的 pollFreshVerificationCode。
  *
- * 原项目按不同邮箱服务商轮询 API 或网页。教学版把“取码”抽成一个注入的适配器：
- * 调用者决定如何读取自己的邮箱，本扩展不保存邮箱登录态或邮箱密码。
+ * 原项目按不同邮箱服务商轮询 API 或网页。第 5 步的 QQ 邮箱路径由
+ * `content/qq-mail-learning.js` 注入已登录的网页实现；这个小函数保留为可测试的
+ * 手动输入适配器，不保存邮箱登录态或邮箱密码。
  */
 export async function pollFreshVerificationCode(step, state, mail) {
   if (!mail || typeof mail.fetchLatestCode !== 'function') {

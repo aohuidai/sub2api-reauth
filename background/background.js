@@ -4,10 +4,22 @@ import {
   createCapturedCallbackState,
   createPendingCallbackCaptureState,
   isLocalhostCallbackUrl,
+  normalizeVerificationCode,
   pollFreshVerificationCode,
 } from './openai-learning.js';
 
 const sub2ApiClient = createSub2ApiClient();
+const OPENAI_AUTH_TAB_KEY = 'openAiLearningAuthTabId';
+const REAUTH_CONTEXT_KEY = 'sub2apiReauthContext';
+const QQ_MAIL_BASELINE_KEY = 'openAiQqMailBaseline';
+const QQ_VERIFICATION_CODE_KEY = 'openAiLearningVerificationCode';
+const QQ_MAIL_POLL_MESSAGE = 'POLL_QQ_OPENAI_LOGIN_CODE_V2';
+const QQ_MAIL_SNAPSHOT_MESSAGE = 'SNAPSHOT_QQ_MAIL_BASELINE_V2';
+const QQ_MAIL_BASELINE_MAX_AGE_MS = 10 * 60 * 1000;
+const QQ_MAIL_URL_PATTERNS = [
+  'https://mail.qq.com/*',
+  'https://wx.mail.qq.com/*',
+];
 const LEARNING_ACTIONS = new Set([
   'fill-email',
   'continue-after-email',
@@ -20,6 +32,9 @@ const LEARNING_ACTIONS = new Set([
 const HANDLED_MESSAGE_TYPES = new Set([
   'QUERY_REAUTH_CANDIDATES',
   'OPEN_FIRST_OPENAI_REAUTH',
+  'SNAPSHOT_QQ_MAIL_BASELINE',
+  'FETCH_QQ_OPENAI_LOGIN_CODE',
+  'SUBMIT_OPENAI_REAUTH_CALLBACK',
   'RUN_OPENAI_LEARNING_STEP',
   'CONFIRM_MANUAL_VERIFICATION_CODE',
   'ARM_OPENAI_CALLBACK_CAPTURE',
@@ -39,6 +54,27 @@ async function getOpenAiCallbackState() {
     startedAt: null,
     capturedAt: null,
   };
+}
+
+async function setOpenAiAuthTabId(tabId) {
+  if (Number.isInteger(tabId)) {
+    await chrome.storage.session.set({ [OPENAI_AUTH_TAB_KEY]: tabId });
+  }
+}
+
+async function getOpenAiAuthTabId() {
+  const stored = await chrome.storage.session.get(OPENAI_AUTH_TAB_KEY);
+  return Number.isInteger(stored[OPENAI_AUTH_TAB_KEY]) ? stored[OPENAI_AUTH_TAB_KEY] : null;
+}
+
+async function getReauthContext() {
+  const stored = await chrome.storage.session.get(REAUTH_CONTEXT_KEY);
+  return stored[REAUTH_CONTEXT_KEY] || null;
+}
+
+async function activateTab(tabId) {
+  if (!Number.isInteger(tabId)) return;
+  await chrome.tabs.update(tabId, { active: true });
 }
 
 async function notifyCallbackCaptured(state) {
@@ -88,6 +124,7 @@ async function runOpenAiLearningStep(message = {}) {
   }
 
   const tabId = await getActiveTabId();
+  await setOpenAiAuthTabId(tabId);
   try {
     // 内容脚本只在用户主动操作时注入，避免在不相关网页运行。
     await chrome.scripting.executeScript({
@@ -113,6 +150,144 @@ async function runOpenAiLearningStep(message = {}) {
   }
 }
 
+async function findQqMailTab(preferredTabId = null) {
+  const tabs = await chrome.tabs.query({ url: QQ_MAIL_URL_PATTERNS });
+  return tabs.find((tab) => tab.id === preferredTabId)
+    || tabs.find((tab) => tab.active && Number.isInteger(tab?.id))
+    || tabs.find((tab) => Number.isInteger(tab?.id))
+    || null;
+}
+
+async function injectQqMailLearningScript(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content/qq-mail-learning.js'],
+  });
+}
+
+async function getQqMailBaseline() {
+  const stored = await chrome.storage.session.get(QQ_MAIL_BASELINE_KEY);
+  const baseline = stored[QQ_MAIL_BASELINE_KEY];
+  if (!baseline || Date.now() - Number(baseline.capturedAt || 0) > QQ_MAIL_BASELINE_MAX_AGE_MS) {
+    return null;
+  }
+  return baseline;
+}
+
+async function captureQqMailBaseline() {
+  const mailTab = await findQqMailTab();
+  if (!mailTab) {
+    await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+    return { available: false };
+  }
+
+  const authTabId = await getOpenAiAuthTabId();
+  const shouldRestoreAuthTab = Number.isInteger(authTabId) && authTabId !== mailTab.id;
+  try {
+    // QQ Mail only exposes its list after the detail view is left. Bringing this
+    // tab forward makes the inbox transition reliable on its virtualized UI.
+    if (shouldRestoreAuthTab) await activateTab(mailTab.id);
+    await injectQqMailLearningScript(mailTab.id);
+    const response = await chrome.tabs.sendMessage(mailTab.id, {
+      type: QQ_MAIL_SNAPSHOT_MESSAGE,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'QQ 邮箱未返回当前邮件基线。');
+    }
+    if (response.result?.needsLogin) {
+      await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+      return { available: false, needsLogin: true, mailTabId: mailTab.id };
+    }
+    const baseline = {
+      ...(response.result || {}),
+      capturedAt: Date.now(),
+      mailTabId: mailTab.id,
+    };
+    await chrome.storage.session.set({ [QQ_MAIL_BASELINE_KEY]: baseline });
+    return { available: true, mailTabId: mailTab.id };
+  } catch (error) {
+    await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+    return { available: false, error: String(error?.message || 'QQ 邮箱基线获取失败。') };
+  } finally {
+    if (shouldRestoreAuthTab) {
+      await activateTab(authTabId).catch(() => {});
+    }
+  }
+}
+
+async function fetchQqOpenAiLoginCode() {
+  const authTabId = await getOpenAiAuthTabId();
+  let baseline = await getQqMailBaseline();
+  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
+  if (!baseline) {
+    const prepared = await captureQqMailBaseline();
+    if (prepared.needsLogin) return prepared;
+    if (prepared.error) throw new Error(prepared.error);
+    const currentMailTab = await findQqMailTab();
+    if (!prepared.available && !currentMailTab) {
+      const openedMailTab = await chrome.tabs.create({ url: 'https://wx.mail.qq.com/', active: true });
+      return {
+        needsLogin: true,
+        mailTabId: Number.isInteger(openedMailTab?.id) ? openedMailTab.id : null,
+      };
+    }
+    return { needsFreshCode: true };
+  }
+  let mailTab = await findQqMailTab(baseline.mailTabId);
+  if (!mailTab) {
+    mailTab = await chrome.tabs.create({ url: 'https://wx.mail.qq.com/', active: true });
+    return {
+      needsLogin: true,
+      mailTabId: Number.isInteger(mailTab?.id) ? mailTab.id : null,
+    };
+  }
+  if (mailTab.id !== baseline.mailTabId) {
+    await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+    return { needsFreshCode: true };
+  }
+
+  const mailTabId = mailTab.id;
+  let shouldRestoreAuthTab = Number.isInteger(authTabId) && authTabId !== mailTabId;
+  try {
+    await activateTab(mailTabId);
+    await injectQqMailLearningScript(mailTabId);
+    const response = await chrome.tabs.sendMessage(mailTabId, {
+      type: QQ_MAIL_POLL_MESSAGE,
+      payload: {
+        maxAttempts: 8,
+        intervalMs: 3_000,
+        baseline,
+      },
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'QQ 邮箱未返回验证码。');
+    }
+    if (response.result?.needsLogin) {
+      shouldRestoreAuthTab = false;
+      return {
+        needsLogin: true,
+        mailTabId,
+      };
+    }
+    if (response.result?.needsFreshCode) {
+      return { needsFreshCode: true };
+    }
+    const code = normalizeVerificationCode(response.result?.code);
+    await chrome.storage.session.set({ [QQ_VERIFICATION_CODE_KEY]: code });
+    return {
+      ...response.result,
+      code,
+      needsLogin: false,
+      mailTabId,
+      authTabId,
+    };
+  } finally {
+    if (shouldRestoreAuthTab) {
+      await activateTab(authTabId).catch(() => {});
+    }
+  }
+}
+
 async function confirmManualVerificationCode(code) {
   // 用一个手动适配器调用与 FlowPilot 同名的“取码”函数，保留清晰的职责边界。
   return pollFreshVerificationCode(8, {}, {
@@ -132,16 +307,56 @@ async function handleMessage(message = {}) {
       message.connection || {},
       message.account || {}
     );
+    let openedTab;
     try {
-      await chrome.tabs.create({ url: result.oauthUrl, active: true });
+      openedTab = await chrome.tabs.create({ url: result.oauthUrl, active: true });
     } catch (_) {
       throw new Error('已生成重授权地址，但无法在新标签页打开。');
     }
+    await setOpenAiAuthTabId(openedTab?.id);
+    await chrome.storage.session.set({
+      [REAUTH_CONTEXT_KEY]: {
+        account: result.account,
+        sessionId: result.sessionId,
+        oauthState: result.oauthState,
+        redirectUri: result.redirectUri,
+      },
+    });
+    return { result };
+  }
+
+  if (message.type === 'FETCH_QQ_OPENAI_LOGIN_CODE') {
+    return { result: await fetchQqOpenAiLoginCode() };
+  }
+
+  if (message.type === 'SNAPSHOT_QQ_MAIL_BASELINE') {
+    return { result: await captureQqMailBaseline() };
+  }
+
+  if (message.type === 'SUBMIT_OPENAI_REAUTH_CALLBACK') {
+    const callback = await getOpenAiCallbackState();
+    if (!callback.callbackUrl) {
+      throw new Error('尚未捕获 localhost 回调地址。');
+    }
+    const context = await getReauthContext();
+    if (!context) {
+      throw new Error('缺少第 0 步重授权上下文，请重新生成重授权链接。');
+    }
+    const result = await sub2ApiClient.submitReauthCallback(
+      message.connection || {},
+      context,
+      callback.callbackUrl
+    );
+    await chrome.storage.session.remove(REAUTH_CONTEXT_KEY);
     return { result };
   }
 
   if (message.type === 'RUN_OPENAI_LEARNING_STEP') {
-    return { result: await runOpenAiLearningStep(message) };
+    const result = await runOpenAiLearningStep(message);
+    if (message.action === 'submit-code') {
+      await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
+    }
+    return { result };
   }
 
   if (message.type === 'CONFIRM_MANUAL_VERIFICATION_CODE') {
@@ -169,14 +384,20 @@ async function handleMessage(message = {}) {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!HANDLED_MESSAGE_TYPES.has(message?.type)) return undefined;
 
+  const messageType = message.type;
+  console.info(`[sub2api reauth] 收到消息：${messageType}`);
   handleMessage(message)
     .then((payload) => {
+      console.info(`[sub2api reauth] 已完成消息：${messageType}`);
       sendResponse({ ok: true, ...payload });
     })
-    .catch((error) => sendResponse({
-      ok: false,
-      error: String(error?.message || '操作失败。'),
-    }));
+    .catch((error) => {
+      console.error(`[sub2api reauth] 消息失败：${messageType}`, error);
+      sendResponse({
+        ok: false,
+        error: String(error?.message || '操作失败。'),
+      });
+    });
 
   return true;
 });

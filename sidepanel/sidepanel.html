@@ -84,7 +84,8 @@
             <p class="eyebrow">流程</p>
             <h2 id="learning-heading">OpenAI 登录与 OAuth 回调</h2>
           </div>
-          <p class="section-copy">在 OpenAI 登录或授权标签页中，按顺序手动执行。邮箱、密码和验证码只留在当前侧边栏页面，不会写入 Chrome 存储。</p>
+          <p class="section-copy">在 OpenAI 登录或授权标签页中，按顺序执行。SUB2API 和 OpenAI 密码会保存在本机 Chrome 配置中；QQ 邮箱只使用你已有的浏览器登录态。</p>
+          <p id="learning-status" class="learning-status" aria-live="polite">等待在 OpenAI 页面执行步骤。</p>
 
           <ol class="learning-steps">
             <li class="learning-step preparation-step">
@@ -102,7 +103,7 @@
                 <div class="step-heading"><h3>填写邮箱</h3><p>定位登录页的邮箱输入框并触发页面输入事件。</p></div>
                 <div class="step-controls">
                   <label class="visually-hidden" for="login-email">OpenAI 登录邮箱</label>
-                  <input id="login-email" type="email" autocomplete="username" placeholder="name@example.com">
+                  <input id="login-email" name="loginEmail" type="email" autocomplete="username" placeholder="name@example.com">
                   <button type="button" class="learning-button" data-learning-action="fill-email">填入页面</button>
                 </div>
               </div>
@@ -119,10 +120,10 @@
             <li class="learning-step">
               <span class="flow-step" aria-hidden="true">3</span>
               <div class="step-content">
-                <div class="step-heading"><h3>填写密码</h3><p>定位 password 输入框并触发页面输入事件。</p></div>
+                <div class="step-heading"><h3>填写密码</h3><p>定位 password 输入框并触发页面输入事件；密码保存于本机 Chrome 配置。</p></div>
                 <div class="step-controls">
                   <label class="visually-hidden" for="login-password">OpenAI 登录密码</label>
-                  <input id="login-password" type="password" autocomplete="current-password" placeholder="密码">
+                  <input id="login-password" name="loginPassword" type="password" autocomplete="current-password" placeholder="密码">
                   <button type="button" class="learning-button" data-learning-action="fill-password">填入页面</button>
                 </div>
               </div>
@@ -139,11 +140,11 @@
             <li class="learning-step">
               <span class="flow-step" aria-hidden="true">5</span>
               <div class="step-content">
-                <div class="step-heading"><h3>从邮箱取得验证码</h3><p>教学版不登录邮箱；请从自己的邮箱复制验证码后粘贴到这里。</p></div>
+                <div class="step-heading"><h3>从 QQ 邮箱取得验证码</h3><p>自动切换到已登录的 QQ 邮箱标签轮询 OpenAI/ChatGPT 邮件，取得后自动切回认证标签。</p></div>
                 <div class="step-controls">
                   <label class="visually-hidden" for="verification-code">邮箱验证码</label>
                   <input id="verification-code" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="验证码">
-                  <button type="button" class="learning-button" data-learning-action="confirm-code">确认已取得</button>
+                  <button type="button" class="learning-button" data-learning-action="fetch-qq-code">从 QQ 邮箱获取</button>
                 </div>
               </div>
             </li>
@@ -184,9 +185,16 @@
                 </div>
               </div>
             </li>
+
+            <li class="learning-step">
+              <span class="flow-step" aria-hidden="true">10</span>
+              <div class="step-content">
+                <div class="step-heading"><h3>推送重授权结果到 SUB2API</h3><p>交换回调 code，更新第 0 步选中的原账号凭据，并清除其旧错误状态。</p></div>
+                <button type="button" class="learning-button" data-learning-action="push-callback">推送到 SUB2API</button>
+              </div>
+            </li>
           </ol>
 
-          <p id="learning-status" class="learning-status" aria-live="polite">等待在 OpenAI 页面执行步骤。</p>
         </section>
       </main>
     </div>
