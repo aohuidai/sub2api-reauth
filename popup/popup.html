@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>sub2api reoauth</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body data-popup-view="connection">
+    <div class="popup-shell">
+      <header class="popup-header">
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">SR</span>
+          <div>
+            <h1>sub2api reoauth</h1>
+            <p>OpenAI OAuth 重授权</p>
+          </div>
+        </div>
+        <nav class="popup-tabs" aria-label="扩展视图">
+          <button class="popup-tab" type="button" data-popup-view-button="connection" aria-controls="connection-view" aria-selected="true">连接</button>
+          <button class="popup-tab" type="button" data-popup-view-button="flow" aria-controls="flow-view" aria-selected="false">流程</button>
+        </nav>
+      </header>
+
+      <main class="popup-main">
+        <section id="connection-view" class="popup-view" data-popup-view-panel="connection">
+          <section class="connection-section" aria-labelledby="connection-heading">
+            <div class="section-heading">
+              <p class="eyebrow">连接</p>
+              <h2 id="connection-heading">SUB2API</h2>
+            </div>
+
+            <form id="query-form" class="connection-form">
+              <label class="field">
+                <span>SUB2API 地址</span>
+                <input id="base-url" name="baseUrl" type="url" inputmode="url" autocomplete="url" required placeholder="http://localhost:8080/admin/accounts">
+              </label>
+
+              <label class="field">
+                <span>账号</span>
+                <input id="email" name="email" type="email" autocomplete="username" required placeholder="admin@sub2api.local">
+              </label>
+
+              <label class="field">
+                <span>密码</span>
+                <input id="password" name="password" type="password" autocomplete="current-password" required placeholder="管理员密码">
+              </label>
+
+              <label class="field">
+                <span>分组</span>
+                <input id="group-name" name="groupName" type="text" required value="codex 错误" placeholder="codex 错误">
+              </label>
+
+              <button id="query-button" class="primary-button" type="submit">查询账号</button>
+            </form>
+          </section>
+
+          <section class="results-section" aria-labelledby="results-heading" aria-live="polite">
+            <div class="results-header">
+              <div class="section-heading">
+                <p class="eyebrow">结果</p>
+                <h2 id="results-heading">待重授权账号</h2>
+              </div>
+              <span id="result-count" class="result-count">0</span>
+            </div>
+
+            <div id="query-state" class="query-state">等待查询</div>
+            <div id="error-state" class="error-state" hidden></div>
+
+            <div id="results-table-wrap" class="results-table-wrap" hidden>
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">ID</th>
+                    <th scope="col">账号</th>
+                    <th scope="col">状态</th>
+                    <th scope="col">代理</th>
+                    <th scope="col">错误信息</th>
+                  </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="flow-view" class="popup-view" data-popup-view-panel="flow" hidden>
+          <section class="learning-section" aria-labelledby="learning-heading">
+            <div class="section-heading">
+              <p class="eyebrow">流程</p>
+              <h2 id="learning-heading">OpenAI 重授权</h2>
+            </div>
+
+            <div class="flow-navigator" role="tablist" aria-label="重授权步骤">
+              <button class="flow-nav-button" type="button" data-learning-step-button="0" aria-controls="learning-step-0" aria-selected="true" title="第 0 步：打开重授权页">0</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="1" aria-controls="learning-step-1" aria-selected="false" title="第 1 步：填写邮箱">1</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="2" aria-controls="learning-step-2" aria-selected="false" title="第 2 步：点击继续">2</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="3" aria-controls="learning-step-3" aria-selected="false" title="第 3 步：填写密码">3</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="4" aria-controls="learning-step-4" aria-selected="false" title="第 4 步：点击继续">4</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="5" aria-controls="learning-step-5" aria-selected="false" title="第 5 步：从 QQ 邮箱获取验证码">5</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="6" aria-controls="learning-step-6" aria-selected="false" title="第 6 步：填写验证码">6</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="7" aria-controls="learning-step-7" aria-selected="false" title="第 7 步：点击继续">7</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="8" aria-controls="learning-step-8" aria-selected="false" title="第 8 步：确认 OAuth 授权">8</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="9" aria-controls="learning-step-9" aria-selected="false" title="第 9 步：取得回调地址">9</button>
+              <button class="flow-nav-button" type="button" data-learning-step-button="10" aria-controls="learning-step-10" aria-selected="false" title="第 10 步：推送重授权结果">10</button>
+            </div>
+
+            <p id="learning-status" class="learning-status" aria-live="polite">等待在 OpenAI 页面执行步骤。</p>
+
+            <ol class="learning-steps">
+              <li id="learning-step-0" class="learning-step" data-learning-step-panel="0">
+                <span class="flow-step" aria-hidden="true">0</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>打开重授权页</h3><p>使用上方查询的第一个候选账号生成对应的 OAuth 地址。</p></div>
+                  <output id="prepared-account" class="prepared-account">请先完成上方分组查询。</output>
+                  <button type="button" class="primary-button learning-button" data-learning-action="open-first-reauth">打开重授权页</button>
+                </div>
+              </li>
+
+              <li id="learning-step-1" class="learning-step" data-learning-step-panel="1" hidden>
+                <span class="flow-step" aria-hidden="true">1</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>填写邮箱</h3><p>在当前 OpenAI 登录页填写邮箱。</p></div>
+                  <div class="step-controls">
+                    <label class="visually-hidden" for="login-email">OpenAI 登录邮箱</label>
+                    <input id="login-email" name="loginEmail" type="email" autocomplete="username" placeholder="name@example.com">
+                    <button type="button" class="primary-button learning-button" data-learning-action="fill-email">填入页面</button>
+                  </div>
+                </div>
+              </li>
+
+              <li id="learning-step-2" class="learning-step" data-learning-step-panel="2" hidden>
+                <span class="flow-step" aria-hidden="true">2</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>点击继续</h3><p>进入密码页。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="continue-after-email">继续</button>
+                </div>
+              </li>
+
+              <li id="learning-step-3" class="learning-step" data-learning-step-panel="3" hidden>
+                <span class="flow-step" aria-hidden="true">3</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>填写密码</h3><p>密码保存在本机 Chrome 配置中。</p></div>
+                  <div class="step-controls">
+                    <label class="visually-hidden" for="login-password">OpenAI 登录密码</label>
+                    <input id="login-password" name="loginPassword" type="password" autocomplete="current-password" placeholder="密码">
+                    <button type="button" class="primary-button learning-button" data-learning-action="fill-password">填入页面</button>
+                  </div>
+                </div>
+              </li>
+
+              <li id="learning-step-4" class="learning-step" data-learning-step-panel="4" hidden>
+                <span class="flow-step" aria-hidden="true">4</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>点击继续</h3><p>先准备 QQ 收件箱快照，再提交密码。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="continue-after-password">继续</button>
+                </div>
+              </li>
+
+              <li id="learning-step-5" class="learning-step" data-learning-step-panel="5" hidden>
+                <span class="flow-step" aria-hidden="true">5</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>从 QQ 邮箱获取验证码</h3><p>只读取第 4 步快照之后的新邮件。</p></div>
+                  <div class="step-controls">
+                    <label class="visually-hidden" for="verification-code">邮箱验证码</label>
+                    <input id="verification-code" type="text" inputmode="numeric" autocomplete="one-time-code" spellcheck="false" placeholder="验证码">
+                    <button type="button" class="primary-button learning-button" data-learning-action="fetch-qq-code">获取验证码</button>
+                  </div>
+                </div>
+              </li>
+
+              <li id="learning-step-6" class="learning-step" data-learning-step-panel="6" hidden>
+                <span class="flow-step" aria-hidden="true">6</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>填写验证码</h3><p>兼容单个和拆分验证码输入框。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="fill-code">填入页面</button>
+                </div>
+              </li>
+
+              <li id="learning-step-7" class="learning-step" data-learning-step-panel="7" hidden>
+                <span class="flow-step" aria-hidden="true">7</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>点击继续</h3><p>提交验证码。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="submit-code">继续</button>
+                </div>
+              </li>
+
+              <li id="learning-step-8" class="learning-step" data-learning-step-panel="8" hidden>
+                <span class="flow-step" aria-hidden="true">8</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>确认 OAuth 授权</h3><p>会先启动回调监听，再点击授权页继续。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="oauth-continue">授权并继续</button>
+                </div>
+              </li>
+
+              <li id="learning-step-9" class="learning-step" data-learning-step-panel="9" hidden>
+                <span class="flow-step" aria-hidden="true">9</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>取得 localhost 回调地址</h3><p>回调地址只在本次浏览器会话保留。</p></div>
+                  <label class="visually-hidden" for="callback-url">OAuth localhost 回调地址</label>
+                  <textarea id="callback-url" rows="3" readonly placeholder="尚未开始监听"></textarea>
+                  <div class="callback-actions">
+                    <button type="button" class="secondary-button learning-button" data-learning-action="arm-callback">开始监听</button>
+                    <button id="clear-callback" type="button" class="secondary-button" hidden>清除</button>
+                  </div>
+                </div>
+              </li>
+
+              <li id="learning-step-10" class="learning-step" data-learning-step-panel="10" hidden>
+                <span class="flow-step" aria-hidden="true">10</span>
+                <div class="step-content">
+                  <div class="step-heading"><h3>推送重授权结果</h3><p>更新第 0 步选择的原账号并清除旧错误状态。</p></div>
+                  <button type="button" class="primary-button learning-button" data-learning-action="push-callback">推送到 SUB2API</button>
+                </div>
+              </li>
+            </ol>
+          </section>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -42,10 +42,6 @@ const HANDLED_MESSAGE_TYPES = new Set([
   'CLEAR_OPENAI_CALLBACK_CAPTURE',
 ]);
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
-});
-
 async function getOpenAiCallbackState() {
   const stored = await chrome.storage.session.get(CALLBACK_CAPTURE_KEY);
   return stored[CALLBACK_CAPTURE_KEY] || {
@@ -78,14 +74,14 @@ async function activateTab(tabId) {
 }
 
 async function notifyCallbackCaptured(state) {
-  // 侧边栏可能已关闭；没有接收者时无需把这当成错误。
+  // Popup 在切换标签时会关闭；没有接收者时无需把这当成错误。
   try {
     await chrome.runtime.sendMessage?.({
       type: 'OPENAI_CALLBACK_CAPTURED',
       state,
     });
   } catch (_) {
-    // Ignore a missing side panel receiver.
+    // Ignore a missing popup receiver.
   }
 }
 

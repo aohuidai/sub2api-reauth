@@ -36,7 +36,7 @@ function sendToBackground(listener, message) {
   });
 }
 
-test('service worker handles a side panel query through the read-only client', async () => {
+test('service worker handles a popup query through the read-only client', async () => {
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;
   const listeners = {};
@@ -54,9 +54,6 @@ test('service worker handles a side panel query through the read-only client', a
           listeners.onMessage = listener;
         },
       },
-    },
-    sidePanel: {
-      setPanelBehavior: async () => {},
     },
   };
   globalThis.fetch = async (url, options = {}) => {
@@ -128,9 +125,6 @@ test('service worker generates and opens the selected account reauthorization UR
         },
       },
     },
-    sidePanel: {
-      setPanelBehavior: async () => {},
-    },
     storage,
     tabs: {
       create: async (details) => {
@@ -201,7 +195,6 @@ test('service worker snapshots QQ inbox IDs, then polls only with that baseline'
       onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
       onMessage: { addListener(listener) { listeners.onMessage = listener; } },
     },
-    sidePanel: { setPanelBehavior: async () => {} },
     storage,
     tabs: {
       query: async ({ url }) => {
@@ -272,7 +265,6 @@ test('service worker refuses to poll QQ Mail without a fresh inbox baseline', as
       onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
       onMessage: { addListener(listener) { listeners.onMessage = listener; } },
     },
-    sidePanel: { setPanelBehavior: async () => {} },
     storage,
     tabs: {
       query: async () => [{ id: 9, url: 'https://wx.mail.qq.com/' }],
@@ -317,7 +309,6 @@ test('service worker captures a callback and pushes the selected account reautho
       onMessage: { addListener(listener) { listeners.onMessage = listener; } },
       sendMessage: async () => {},
     },
-    sidePanel: { setPanelBehavior: async () => {} },
     storage,
     tabs: {
       create: async () => ({ id: 77 }),

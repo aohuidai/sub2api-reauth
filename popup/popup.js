@@ -15,6 +15,10 @@ const callbackUrl = document.querySelector('#callback-url');
 const clearCallbackButton = document.querySelector('#clear-callback');
 const learningStatus = document.querySelector('#learning-status');
 const preparedAccount = document.querySelector('#prepared-account');
+const popupViewButtons = Array.from(document.querySelectorAll('[data-popup-view-button]'));
+const popupViewPanels = Array.from(document.querySelectorAll('[data-popup-view-panel]'));
+const learningStepButtons = Array.from(document.querySelectorAll('[data-learning-step-button]'));
+const learningStepPanels = Array.from(document.querySelectorAll('[data-learning-step-panel]'));
 const openAiLearningOrigins = [
   'https://*.openai.com/*',
   'https://chatgpt.com/*',
@@ -26,6 +30,10 @@ const qqMailOrigins = [
   'https://wx.mail.qq.com/*',
 ];
 const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
+const POPUP_VIEW_STORAGE_KEY = 'sub2apiReauthPopupView';
+const POPUP_LEARNING_STEP_STORAGE_KEY = 'sub2apiReauthPopupLearningStep';
+const POPUP_QUERY_STORAGE_KEY = 'sub2apiReauthPopupLatestQuery';
+const POPUP_STATUS_STORAGE_KEY = 'sub2apiReauthPopupLearningStatus';
 const learningActionLabels = {
   'open-first-reauth': '第 0 步：打开重授权页',
   'fill-email': '第 1 步：填写邮箱',
@@ -41,6 +49,57 @@ const learningActionLabels = {
 };
 let latestQuery = null;
 let verificationCodeRestoreGeneration = 0;
+
+function normalizePopupView(value) {
+  return value === 'flow' ? 'flow' : 'connection';
+}
+
+function normalizeLearningStep(value) {
+  const step = String(value);
+  return learningStepPanels.some((panel) => panel.dataset.learningStepPanel === step) ? step : '0';
+}
+
+function renderPopupView(value) {
+  const view = normalizePopupView(value);
+  document.body.dataset.popupView = view;
+  for (const popupViewButton of popupViewButtons) {
+    popupViewButton.setAttribute('aria-selected', String(popupViewButton.dataset.popupViewButton === view));
+  }
+  for (const popupViewPanel of popupViewPanels) {
+    popupViewPanel.hidden = popupViewPanel.dataset.popupViewPanel !== view;
+  }
+}
+
+async function selectPopupView(value, { persist = true } = {}) {
+  const view = normalizePopupView(value);
+  renderPopupView(view);
+  if (persist) await chrome.storage.session.set({ [POPUP_VIEW_STORAGE_KEY]: view });
+}
+
+function renderLearningStep(value) {
+  const step = normalizeLearningStep(value);
+  for (const learningStepButton of learningStepButtons) {
+    learningStepButton.setAttribute('aria-selected', String(learningStepButton.dataset.learningStepButton === step));
+  }
+  for (const learningStepPanel of learningStepPanels) {
+    learningStepPanel.hidden = learningStepPanel.dataset.learningStepPanel !== step;
+  }
+}
+
+async function selectLearningStep(value, { persist = true } = {}) {
+  const step = normalizeLearningStep(value);
+  renderLearningStep(step);
+  if (persist) await chrome.storage.session.set({ [POPUP_LEARNING_STEP_STORAGE_KEY]: step });
+}
+
+async function restorePopupNavigation() {
+  const stored = await chrome.storage.session.get([
+    POPUP_VIEW_STORAGE_KEY,
+    POPUP_LEARNING_STEP_STORAGE_KEY,
+  ]);
+  renderPopupView(stored[POPUP_VIEW_STORAGE_KEY]);
+  renderLearningStep(stored[POPUP_LEARNING_STEP_STORAGE_KEY]);
+}
 
 function setBusy(isBusy) {
   button.disabled = isBusy;
@@ -77,6 +136,32 @@ function renderPreparedAccount(account = null) {
 
   const proxyLabel = account.proxyId ? ` · 代理 #${account.proxyId}` : ' · 未配置代理';
   preparedAccount.textContent = `首个候选：#${account.id} · ${account.email || account.name}${proxyLabel}`;
+}
+
+function renderLatestQuery(query = null) {
+  const accounts = Array.isArray(query?.accounts) ? query.accounts : [];
+  renderAccounts(accounts);
+  renderPreparedAccount(accounts[0]);
+  resultCount.textContent = String(accounts.length);
+  tableWrap.hidden = accounts.length === 0;
+  queryState.textContent = query?.summary || (accounts.length ? '已恢复本次查询结果' : '没有匹配的账号');
+  errorState.hidden = true;
+}
+
+async function persistLatestQuery() {
+  if (!latestQuery) {
+    await chrome.storage.session.remove(POPUP_QUERY_STORAGE_KEY);
+    return;
+  }
+  await chrome.storage.session.set({ [POPUP_QUERY_STORAGE_KEY]: latestQuery });
+}
+
+async function restoreLatestQuery() {
+  const stored = await chrome.storage.session.get(POPUP_QUERY_STORAGE_KEY);
+  const query = stored[POPUP_QUERY_STORAGE_KEY];
+  if (!query?.connection || !Array.isArray(query.accounts)) return;
+  latestQuery = query;
+  renderLatestQuery(query);
 }
 
 function normalizeInputUrl(value = '') {
@@ -177,6 +262,7 @@ async function queryAccounts(event) {
   tableWrap.hidden = true;
   queryState.textContent = '正在查询…';
   latestQuery = null;
+  persistLatestQuery().catch(() => {});
   renderPreparedAccount();
 
   try {
@@ -191,19 +277,15 @@ async function queryAccounts(event) {
     }
 
     const accounts = Array.isArray(response.result?.accounts) ? response.result.accounts : [];
-    latestQuery = {
-      connection,
-      accounts,
-    };
-    renderAccounts(accounts);
-    renderPreparedAccount(accounts[0]);
-    resultCount.textContent = String(accounts.length);
-    tableWrap.hidden = accounts.length === 0;
-    queryState.textContent = accounts.length
+    const summary = accounts.length
       ? `${response.result.group.name} · ${response.result.statuses.join(' / ')}`
       : '没有匹配的账号';
+    latestQuery = { connection, accounts, summary };
+    renderLatestQuery(latestQuery);
+    persistLatestQuery().catch(() => {});
   } catch (error) {
     latestQuery = null;
+    persistLatestQuery().catch(() => {});
     renderPreparedAccount();
     resultCount.textContent = '0';
     errorState.textContent = error.message || '查询失败。';
@@ -214,9 +296,23 @@ async function queryAccounts(event) {
   }
 }
 
-function setLearningStatus(message, kind = 'idle') {
+function renderLearningStatus(message, kind = 'idle') {
   learningStatus.textContent = message;
   learningStatus.dataset.kind = kind;
+}
+
+function setLearningStatus(message, kind = 'idle') {
+  renderLearningStatus(message, kind);
+  chrome.storage.session.set({
+    [POPUP_STATUS_STORAGE_KEY]: { message, kind },
+  }).catch(() => {});
+}
+
+async function restoreLearningStatus() {
+  const stored = await chrome.storage.session.get(POPUP_STATUS_STORAGE_KEY);
+  const status = stored[POPUP_STATUS_STORAGE_KEY];
+  if (!status?.message) return;
+  renderLearningStatus(status.message, status.kind || 'idle');
 }
 
 function setLearningBusy(isBusy) {
@@ -279,6 +375,8 @@ async function openFirstOpenAiReauth() {
   loginEmailInput.value = result.account.email;
   await saveLearningFields();
   renderPreparedAccount(result.account);
+  selectPopupView('flow').catch(() => {});
+  selectLearningStep('1').catch(() => {});
   setLearningStatus(`已打开 #${result.account.id} 的重授权页，并带入邮箱 ${result.account.email}。`, 'success');
 }
 
@@ -455,12 +553,23 @@ async function clearCallbackCapture() {
 form.addEventListener('submit', queryAccounts);
 form.addEventListener('input', (event) => {
   latestQuery = null;
+  persistLatestQuery().catch(() => {});
   renderPreparedAccount();
   if (savedConnectionFieldNames.includes(event.target.name)) saveConnectionFields().catch(() => {});
 });
 loginEmailInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
 loginPasswordInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
 verificationCodeInput.addEventListener('input', () => saveVerificationCode().catch(() => {}));
+for (const popupViewButton of popupViewButtons) {
+  popupViewButton.addEventListener('click', () => {
+    selectPopupView(popupViewButton.dataset.popupViewButton).catch(() => {});
+  });
+}
+for (const learningStepButton of learningStepButtons) {
+  learningStepButton.addEventListener('click', () => {
+    selectLearningStep(learningStepButton.dataset.learningStepButton).catch(() => {});
+  });
+}
 for (const learningButton of learningButtons) {
   learningButton.addEventListener('click', handleLearningButtonClick);
 }
@@ -471,6 +580,11 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-restoreSettings().catch(() => {});
-restoreVerificationCode().catch(() => {});
-refreshCallbackState().catch(() => {});
+Promise.all([
+  restoreSettings(),
+  restoreVerificationCode(),
+  restorePopupNavigation(),
+  restoreLatestQuery(),
+  restoreLearningStatus(),
+  refreshCallbackState(),
+]).catch(() => {});

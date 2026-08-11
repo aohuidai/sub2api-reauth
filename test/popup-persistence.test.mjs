@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-const source = fs.readFileSync(new URL('../sidepanel/sidepanel.js', import.meta.url), 'utf8');
+const source = fs.readFileSync(new URL('../popup/popup.js', import.meta.url), 'utf8');
 
 function extractAsyncFunction(name) {
   const marker = `async function ${name}(`;
@@ -31,7 +31,7 @@ class FormDataMock {
   }
 }
 
-test('side panel persists and restores both connection and OpenAI passwords', async () => {
+test('popup persists and restores both connection and OpenAI passwords', async () => {
   const fields = Object.fromEntries([
     'baseUrl',
     'email',
@@ -123,7 +123,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
   assert.equal(loginPasswordInput.value, 'saved-openai-password');
 });
 
-test('side panel explains a missing background response instead of showing a generic error', async () => {
+test('popup explains a missing background response instead of showing a generic error', async () => {
   const api = new Function(
     'chrome',
     `
@@ -142,7 +142,7 @@ test('side panel explains a missing background response instead of showing a gen
   );
 });
 
-test('side panel restores a temporary QQ verification code after it is reconstructed', async () => {
+test('popup restores a temporary QQ verification code after it is reconstructed', async () => {
   const verificationCodeInput = { value: '' };
   const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
   const api = new Function(
@@ -168,7 +168,7 @@ test('side panel restores a temporary QQ verification code after it is reconstru
   assert.equal(verificationCodeInput.value, '111111');
 });
 
-test('side panel restores a temporary QQ verification code without reviving a cleared value', async () => {
+test('popup restores a temporary QQ verification code without reviving a cleared value', async () => {
   const verificationCodeInput = { value: '' };
   const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
   let resolveRead;
@@ -207,4 +207,38 @@ test('side panel restores a temporary QQ verification code without reviving a cl
 
   assert.equal(verificationCodeInput.value, '');
   assert.deepEqual(removed, [QQ_VERIFICATION_CODE_STORAGE_KEY]);
+});
+
+test('popup restores the latest query after it is reopened', async () => {
+  const POPUP_QUERY_STORAGE_KEY = 'sub2apiReauthPopupLatestQuery';
+  const savedQuery = {
+    connection: { baseUrl: 'https://sub2api.example.com', email: 'admin@example.com', password: 'stored' },
+    accounts: [{ id: 10, email: 'target@example.com' }],
+    summary: 'codex 错误 · error',
+  };
+  const rendered = [];
+  const api = new Function(
+    'chrome',
+    'POPUP_QUERY_STORAGE_KEY',
+    'renderLatestQuery',
+    `
+      let latestQuery = null;
+      ${extractAsyncFunction('restoreLatestQuery')}
+      return { restoreLatestQuery, getLatestQuery: () => latestQuery };
+    `
+  )({
+    storage: {
+      session: {
+        async get(key) {
+          assert.equal(key, POPUP_QUERY_STORAGE_KEY);
+          return { [POPUP_QUERY_STORAGE_KEY]: savedQuery };
+        },
+      },
+    },
+  }, POPUP_QUERY_STORAGE_KEY, (query) => rendered.push(query));
+
+  await api.restoreLatestQuery();
+
+  assert.equal(api.getLatestQuery().accounts[0].id, 10);
+  assert.deepEqual(rendered, [savedQuery]);
 });
