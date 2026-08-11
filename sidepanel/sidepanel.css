@@ -275,6 +275,16 @@ h2 {
   line-height: 1.5;
 }
 
+.prepared-account {
+  display: block;
+  margin-top: 12px;
+  color: var(--amber);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .step-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -329,6 +339,9 @@ h2 {
 .learning-step > .step-content > .learning-button {
   min-width: 116px;
   margin-top: 12px;
+  max-width: 100%;
+  padding: 0 14px;
+  white-space: normal;
 }
 
 .learning-button:hover:not(:disabled),

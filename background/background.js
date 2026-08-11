@@ -19,6 +19,7 @@ const LEARNING_ACTIONS = new Set([
 ]);
 const HANDLED_MESSAGE_TYPES = new Set([
   'QUERY_REAUTH_CANDIDATES',
+  'OPEN_FIRST_OPENAI_REAUTH',
   'RUN_OPENAI_LEARNING_STEP',
   'CONFIRM_MANUAL_VERIFICATION_CODE',
   'ARM_OPENAI_CALLBACK_CAPTURE',
@@ -124,6 +125,19 @@ async function handleMessage(message = {}) {
     return {
       result: await sub2ApiClient.queryReauthCandidates(message.connection || {}),
     };
+  }
+
+  if (message.type === 'OPEN_FIRST_OPENAI_REAUTH') {
+    const result = await sub2ApiClient.prepareReauthForAccount(
+      message.connection || {},
+      message.account || {}
+    );
+    try {
+      await chrome.tabs.create({ url: result.oauthUrl, active: true });
+    } catch (_) {
+      throw new Error('已生成重授权地址，但无法在新标签页打开。');
+    }
+    return { result };
   }
 
   if (message.type === 'RUN_OPENAI_LEARNING_STEP') {

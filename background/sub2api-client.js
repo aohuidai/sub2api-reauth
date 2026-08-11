@@ -2,6 +2,7 @@ const DEFAULT_PAGE_SIZE = 100;
 const MAX_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 20;
 const DEFAULT_STATUSES = Object.freeze(['error', 'temp_unschedulable']);
+const DEFAULT_REAUTH_REDIRECT_URI = 'http://localhost:1455/auth/callback';
 
 function normalizeString(value = '') {
   return String(value || '').trim();
@@ -80,6 +81,31 @@ function normalizePositiveIds(values = []) {
   return (Array.isArray(values) ? values : [])
     .map((value) => Number(value))
     .filter((value) => Number.isSafeInteger(value) && value > 0);
+}
+
+function normalizeOptionalPositiveId(value) {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+}
+
+function extractOAuthState(oauthUrl = '') {
+  try {
+    return new URL(oauthUrl).searchParams.get('state') || '';
+  } catch {
+    return '';
+  }
+}
+
+function normalizeOAuthUrl(value = '') {
+  try {
+    const url = new URL(normalizeString(value));
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new Error('unsupported protocol');
+    }
+    return url.toString();
+  } catch {
+    throw createRequestError('SUB2API 未返回有效的 OpenAI 授权地址。', 502);
+  }
 }
 
 function getAccountEmail(account = {}) {
@@ -317,7 +343,51 @@ export function createSub2ApiClient({ fetchImpl = globalThis.fetch, timeoutMs = 
     };
   }
 
+  /**
+   * FlowPilot 对应 prepareFirstOpenAiAccountReauth 的“生成链接”部分。
+   * 候选账号已经由侧边栏上一次查询选出，因此这里不重新扫描分组。
+   */
+  async function prepareReauthForAccount(connection = {}, account = {}) {
+    const accountId = normalizeOptionalPositiveId(account.id);
+    const email = getAccountEmail(account);
+    if (!accountId || !email) {
+      throw createRequestError('请选择一个带有效 ID 和邮箱的 OpenAI OAuth 账号。', 400);
+    }
+
+    const { origin, token } = await login(connection);
+    const proxyId = normalizeOptionalPositiveId(account.proxyId ?? account.proxy_id);
+    const requestBody = {
+      redirect_uri: DEFAULT_REAUTH_REDIRECT_URI,
+      account_id: accountId,
+    };
+    if (proxyId) requestBody.proxy_id = proxyId;
+
+    const data = await requestJson(origin, '/api/v1/admin/openai/generate-auth-url', {
+      method: 'POST',
+      token,
+      body: requestBody,
+    });
+    const oauthUrl = normalizeOAuthUrl(data?.auth_url || data?.authUrl);
+    const sessionId = normalizeString(data?.session_id || data?.sessionId);
+    if (!sessionId) {
+      throw createRequestError('SUB2API 未返回重授权 session_id。', 502);
+    }
+
+    return {
+      oauthUrl,
+      sessionId,
+      oauthState: normalizeString(data?.state || extractOAuthState(oauthUrl)),
+      redirectUri: DEFAULT_REAUTH_REDIRECT_URI,
+      account: {
+        id: accountId,
+        email,
+        proxyId,
+      },
+    };
+  }
+
   return {
+    prepareReauthForAccount,
     queryReauthCandidates,
   };
 }

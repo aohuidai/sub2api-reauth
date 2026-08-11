@@ -150,3 +150,50 @@ test('rejects a missing group without making an account-list request', async () 
   );
   assert.equal(calls.includes('/api/v1/admin/accounts'), false);
 });
+
+test('generates a reauthorization URL for the selected first account without updating it', async () => {
+  const calls = [];
+  const client = createSub2ApiClient({
+    fetchImpl: async (url, options = {}) => {
+      const parsed = new URL(url);
+      const body = options.body ? JSON.parse(options.body) : null;
+      calls.push({ path: parsed.pathname, method: options.method || 'GET', body });
+
+      if (parsed.pathname === '/api/v1/auth/login') {
+        return jsonResponse({ code: 0, data: { access_token: 'admin-token' } });
+      }
+      if (parsed.pathname === '/api/v1/admin/openai/generate-auth-url') {
+        assert.deepEqual(body, {
+          redirect_uri: 'http://localhost:1455/auth/callback',
+          account_id: 10,
+          proxy_id: 8,
+        });
+        return jsonResponse({
+          code: 0,
+          data: {
+            auth_url: 'https://auth.openai.com/oauth/authorize?state=reauth-state',
+            session_id: 'reauth-session',
+          },
+        });
+      }
+      return jsonResponse({ code: 1, message: 'Unexpected request' }, 404);
+    },
+  });
+
+  const result = await client.prepareReauthForAccount({
+    baseUrl: 'http://localhost:8080/admin/accounts',
+    email: 'admin@sub2api.local',
+    password: 'not-stored',
+  }, {
+    id: 10,
+    email: 'target@example.com',
+    proxyId: 8,
+  });
+
+  assert.deepEqual(result.account, { id: 10, email: 'target@example.com', proxyId: 8 });
+  assert.equal(result.sessionId, 'reauth-session');
+  assert.equal(result.oauthState, 'reauth-state');
+  assert.equal(result.oauthUrl, 'https://auth.openai.com/oauth/authorize?state=reauth-state');
+  assert.equal(calls.some((call) => call.method === 'PUT'), false);
+  assert.equal(calls.some((call) => call.path.endsWith('/clear-error')), false);
+});

@@ -2,7 +2,7 @@
 
 本项目只抽取你要学习的“正常路径”。原项目需要兼容多种邮箱服务商、页面重试、手机号登录、Cloudflare 验证和调试器点击，因此代码体量会大很多；这些恢复分支没有整体复制进来。
 
-FlowPilot 的界面编号与这里的九步并不完全相同：登录通常是原项目的 Step 7，登录邮件验证码是 Step 8，OAuth 同意和回调捕获是 Step 9。
+FlowPilot 的界面编号与这里的第 0 到 9 步并不完全相同：登录通常是原项目的 Step 7，登录邮件验证码是 Step 8，OAuth 同意和回调捕获是 Step 9。
 
 ```mermaid
 sequenceDiagram
@@ -22,10 +22,11 @@ sequenceDiagram
   B-->>P: 显示回调地址
 ```
 
-## 九步函数表
+## 第 0 到 9 步函数表
 
 | 你的步骤 | FlowPilot 原函数 | 教学版函数 | 作用与差异 |
 | --- | --- | --- | --- |
+| 0. 打开重授权页 | `prepareFirstOpenAiAccountReauth` | `prepareReauthForAccount`、`OPEN_FIRST_OPENAI_REAUTH` | 直接使用上方查询结果的第一个候选账号，传递 `account_id`、`proxy_id` 和 localhost 回调地址给 SUB2API，再在新标签页打开返回的 `auth_url`。不更新账号。 |
 | 1. 填写邮箱 | `getLoginEmailInput`、`step6LoginFromEmailPage` | `getLoginEmailInput`、`step6LoginFromEmailPage` | 找到邮箱框，用原生 value setter 和 `input`/`change` 事件写入值。原版随后会自动提交；教学版停在这里。 |
 | 2. 点击继续 | `getLoginSubmitButton`、`triggerLoginSubmitAction` | `getLoginSubmitButton`、`clickLoginContinue` | 找当前可用的 submit/Continue 按钮并点击，方便你先看到密码页。 |
 | 3. 填写密码 | `getLoginPasswordInput`、`step6LoginFromPasswordPage` | `getLoginPasswordInput`、`step6LoginFromPasswordPage` | 找到 `input[type=password]` 后填写。密码不进 Chrome 存储。 |
@@ -47,9 +48,9 @@ sequenceDiagram
 
 ## 新项目的调用路径
 
-1. [sidepanel/sidepanel.js](../sidepanel/sidepanel.js) 读取当前输入，先按需请求 OpenAI 和 localhost 的可选站点权限。
-2. 它发送 `RUN_OPENAI_LEARNING_STEP` 给 [background/background.js](../background/background.js)。
-3. service worker 用 `chrome.scripting.executeScript` 把 [content/openai-login-learning.js](../content/openai-login-learning.js) 注入当前 OpenAI 标签，再用 `chrome.tabs.sendMessage` 调用对应函数。
+1. [sidepanel/sidepanel.js](../sidepanel/sidepanel.js) 先查询分组。第 0 步发送 `OPEN_FIRST_OPENAI_REAUTH`，并把首个候选账号和当前 SUB2API 连接信息交给后台。
+2. [background/background.js](../background/background.js) 调用 [background/sub2api-client.js](../background/sub2api-client.js) 的 `prepareReauthForAccount`，再用 `chrome.tabs.create` 打开返回的授权页。
+3. 步骤 1 到 8 再按需请求 OpenAI 和 localhost 的可选站点权限，并通过 `RUN_OPENAI_LEARNING_STEP` 注入 [content/openai-login-learning.js](../content/openai-login-learning.js)。
 4. 点击第 8 步前，service worker 把“正在监听”写入 `chrome.storage.session`；`webNavigation.onBeforeNavigate` 和 `onCommitted` 遇到 localhost 地址后写入结果。
 
 ## 为什么第 5 步不直接登录邮箱

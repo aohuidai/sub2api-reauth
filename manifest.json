@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "sub2api reoauth",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "查询待重授权账号并学习 OpenAI OAuth 登录流程",
   "permissions": [
     "sidePanel",

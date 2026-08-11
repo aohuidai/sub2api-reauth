@@ -13,12 +13,14 @@ const verificationCodeInput = document.querySelector('#verification-code');
 const callbackUrl = document.querySelector('#callback-url');
 const clearCallbackButton = document.querySelector('#clear-callback');
 const learningStatus = document.querySelector('#learning-status');
+const preparedAccount = document.querySelector('#prepared-account');
 const openAiLearningOrigins = [
   'https://*.openai.com/*',
   'https://chatgpt.com/*',
   'http://localhost/*',
   'https://localhost/*',
 ];
+let latestQuery = null;
 
 function setBusy(isBusy) {
   button.disabled = isBusy;
@@ -45,6 +47,16 @@ function renderAccounts(accounts) {
     );
     resultsBody.append(row);
   }
+}
+
+function renderPreparedAccount(account = null) {
+  if (!account) {
+    preparedAccount.textContent = '请先完成上方分组查询。';
+    return;
+  }
+
+  const proxyLabel = account.proxyId ? ` · 代理 #${account.proxyId}` : ' · 未配置代理';
+  preparedAccount.textContent = `首个候选：#${account.id} · ${account.email || account.name}${proxyLabel}`;
 }
 
 function normalizeInputUrl(value = '') {
@@ -102,6 +114,8 @@ async function queryAccounts(event) {
   errorState.hidden = true;
   tableWrap.hidden = true;
   queryState.textContent = '正在查询…';
+  latestQuery = null;
+  renderPreparedAccount();
 
   try {
     await ensureHostPermission(connection.baseUrl);
@@ -115,13 +129,20 @@ async function queryAccounts(event) {
     }
 
     const accounts = Array.isArray(response.result?.accounts) ? response.result.accounts : [];
+    latestQuery = {
+      connection,
+      accounts,
+    };
     renderAccounts(accounts);
+    renderPreparedAccount(accounts[0]);
     resultCount.textContent = String(accounts.length);
     tableWrap.hidden = accounts.length === 0;
     queryState.textContent = accounts.length
       ? `${response.result.group.name} · ${response.result.statuses.join(' / ')}`
       : '没有匹配的账号';
   } catch (error) {
+    latestQuery = null;
+    renderPreparedAccount();
     resultCount.textContent = '0';
     errorState.textContent = error.message || '查询失败。';
     errorState.hidden = false;
@@ -158,6 +179,24 @@ async function sendLearningMessage(message) {
     throw new Error(response?.error || '学习步骤未完成。');
   }
   return response.result || {};
+}
+
+async function openFirstOpenAiReauth() {
+  const account = latestQuery?.accounts?.[0];
+  if (!account) {
+    throw new Error('请先查询上方分组，取得至少一个待重授权账号。');
+  }
+
+  await ensureHostPermission(latestQuery.connection.baseUrl);
+  const result = await sendLearningMessage({
+    type: 'OPEN_FIRST_OPENAI_REAUTH',
+    connection: latestQuery.connection,
+    account,
+  });
+
+  loginEmailInput.value = result.account.email;
+  renderPreparedAccount(result.account);
+  setLearningStatus(`已打开 #${result.account.id} 的重授权页，并带入邮箱 ${result.account.email}。`, 'success');
 }
 
 function getVerificationCode() {
@@ -212,6 +251,9 @@ async function armCallbackCapture() {
 
 async function handleLearningAction(action) {
   switch (action) {
+    case 'open-first-reauth':
+      await openFirstOpenAiReauth();
+      return;
     case 'fill-email': {
       const result = await runPageLearningStep(action, { email: loginEmailInput.value });
       setLearningStatus(formatActionResult(result, '邮箱已填入页面。'), 'success');
@@ -286,6 +328,8 @@ async function clearCallbackCapture() {
 
 form.addEventListener('submit', queryAccounts);
 form.addEventListener('input', (event) => {
+  latestQuery = null;
+  renderPreparedAccount();
   if (savedFieldNames.includes(event.target.name)) {
     saveNonSensitiveFields().catch(() => {});
   }
