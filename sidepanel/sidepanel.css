@@ -15,12 +15,20 @@
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html,
 body {
-  min-width: 320px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+body {
   min-height: 100vh;
   margin: 0;
   background: var(--canvas);
@@ -28,18 +36,22 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
 button {
   cursor: pointer;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .app-shell {
-  width: min(100% - 28px, 720px);
+  width: 100%;
+  min-width: 0;
   margin: 0 auto;
-  padding: 22px 0 34px;
+  padding: 22px 14px 34px;
 }
 
 .app-header,
@@ -53,6 +65,7 @@ button {
 .app-header {
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
   padding-bottom: 22px;
   border-bottom: 1px solid var(--border);
 }
@@ -60,6 +73,10 @@ button {
 .brand-lockup {
   min-width: 0;
   gap: 12px;
+}
+
+.brand-lockup > div {
+  min-width: 0;
 }
 
 .brand-mark {
@@ -86,12 +103,14 @@ h1 {
   font-size: 20px;
   font-weight: 650;
   letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
 .brand-lockup p {
   margin-top: 2px;
   color: var(--muted);
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .mode-badge,
@@ -100,18 +119,27 @@ h1 {
   align-items: center;
   min-height: 28px;
   padding: 0 10px;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
   color: var(--teal);
   font-family: var(--mono);
   font-size: 12px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 main {
   display: grid;
+  min-width: 0;
   gap: 30px;
   padding-top: 26px;
+}
+
+.connection-section,
+.results-section,
+.learning-section {
+  min-width: 0;
 }
 
 .connection-section {
@@ -125,7 +153,9 @@ main {
 }
 
 .section-heading {
+  min-width: 0;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .eyebrow {
@@ -138,16 +168,19 @@ main {
 h2 {
   font-size: 17px;
   font-weight: 650;
+  overflow-wrap: anywhere;
 }
 
 .connection-form {
   display: grid;
+  min-width: 0;
   gap: 16px;
   margin-top: 24px;
 }
 
 .field {
   display: grid;
+  min-width: 0;
   gap: 8px;
   color: var(--muted);
   font-size: 13px;
@@ -202,6 +235,7 @@ h2 {
 
 .full-demo-button {
   width: 100%;
+  max-width: 100%;
   min-height: 46px;
   margin-top: 18px;
   border: 1px solid var(--teal-strong);
@@ -224,6 +258,7 @@ h2 {
 .results-header {
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
 }
 
 .query-state,
@@ -235,18 +270,22 @@ h2 {
   color: var(--muted);
   font-family: var(--mono);
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .section-copy {
-  max-width: 680px;
+  width: 100%;
+  min-width: 0;
   margin-top: 14px;
   color: var(--muted);
   font-size: 13px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
 }
 
 .learning-steps {
   display: grid;
+  min-width: 0;
   margin: 22px 0 0;
   padding: 0;
   list-style: none;
@@ -255,6 +294,7 @@ h2 {
 
 .learning-step {
   display: grid;
+  min-width: 0;
   grid-template-columns: 30px minmax(0, 1fr);
   gap: 12px;
   padding: 17px 0;
@@ -279,6 +319,7 @@ h2 {
 }
 
 .step-heading {
+  min-width: 0;
   display: grid;
   gap: 4px;
 }
@@ -288,12 +329,14 @@ h2 {
   color: var(--text);
   font-size: 14px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 
 .step-heading p {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 .prepared-account {
@@ -308,6 +351,8 @@ h2 {
 
 .step-controls {
   display: grid;
+  width: 100%;
+  min-width: 0;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   margin-top: 12px;
@@ -317,6 +362,7 @@ h2 {
 .callback-step textarea {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   border: 1px solid var(--border);
   border-radius: 7px;
   outline: none;
@@ -348,6 +394,8 @@ h2 {
 
 .learning-button,
 .icon-text-button {
+  min-width: 0;
+  max-width: 100%;
   min-height: 38px;
   border: 1px solid var(--teal-strong);
   border-radius: 7px;
@@ -358,7 +406,7 @@ h2 {
 }
 
 .learning-step > .step-content > .learning-button {
-  min-width: 116px;
+  min-width: 0;
   margin-top: 12px;
   max-width: 100%;
   padding: 0 14px;
@@ -385,6 +433,7 @@ h2 {
 
 .callback-actions {
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 10px;
@@ -392,7 +441,7 @@ h2 {
 
 .callback-actions .learning-button,
 .callback-actions .icon-text-button {
-  min-width: 98px;
+  min-width: 0;
 }
 
 .learning-status {
@@ -435,6 +484,9 @@ h2 {
 }
 
 .results-table-wrap {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   margin-top: 18px;
   overflow-x: auto;
   border: 1px solid var(--border);
@@ -495,17 +547,20 @@ tbody tr:hover {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 440px) {
+/* FlowPilot 侧边栏同样让容器收缩，并在窄面板把横向操作改为纵向。 */
+@media (max-width: 540px) {
   .app-shell {
-    width: min(100% - 20px, 720px);
+    padding-inline: 10px;
   }
 
-  .app-header {
+  .app-header,
+  .results-header,
+  .section-heading {
     align-items: flex-start;
   }
 
-  .mode-badge {
-    margin-top: 3px;
+  .brand-lockup {
+    flex: 1 1 200px;
   }
 
   .step-controls {
@@ -515,4 +570,42 @@ tbody tr:hover {
   .step-controls .learning-button {
     width: 100%;
   }
+
+  .learning-step > .step-content > .learning-button,
+  .callback-actions .learning-button,
+  .callback-actions .icon-text-button {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .callback-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 360px) {
+  .app-shell {
+    padding-inline: 8px;
+  }
+
+  .learning-step {
+    grid-template-columns: 26px minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+    flex-basis: 32px;
+  }
+
+  .brand-lockup {
+    gap: 9px;
+  }
+}
+
+.field input[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(228, 127, 118, 0.15);
 }

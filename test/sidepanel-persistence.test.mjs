@@ -4,8 +4,8 @@ import test from 'node:test';
 
 const source = fs.readFileSync(new URL('../sidepanel/sidepanel.js', import.meta.url), 'utf8');
 
-function extractAsyncFunction(name) {
-  const marker = `async function ${name}(`;
+function extractFunction(name, { async = false } = {}) {
+  const marker = `${async ? 'async ' : ''}function ${name}(`;
   const start = source.indexOf(marker);
   if (start < 0) throw new Error(`Missing function ${name}`);
 
@@ -21,14 +21,8 @@ function extractAsyncFunction(name) {
   throw new Error(`Unterminated function ${name}`);
 }
 
-class FormDataMock {
-  constructor(form) {
-    this.values = form.values;
-  }
-
-  get(name) {
-    return this.values[name];
-  }
+function extractAsyncFunction(name) {
+  return extractFunction(name, { async: true });
 }
 
 test('side panel persists and restores both connection and OpenAI passwords', async () => {
@@ -38,13 +32,13 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     'password',
     'groupName',
   ].map((name) => [name, { value: '' }]));
+  Object.assign(fields, {
+    baseUrl: { value: 'https://sub2api.example.com/admin/accounts' },
+    email: { value: 'admin@example.com' },
+    password: { value: 'sub2api-password' },
+    groupName: { value: 'codex error' },
+  });
   const form = {
-    values: {
-      baseUrl: 'https://sub2api.example.com/admin/accounts',
-      email: 'admin@example.com',
-      password: 'sub2api-password',
-      groupName: 'codex error',
-    },
     elements: {
       namedItem(name) {
         return fields[name] || null;
@@ -81,11 +75,11 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     'chrome',
     'loginEmailInput',
     'loginPasswordInput',
-    'FormData',
     'savedConnectionFieldNames',
     'savedLearningFieldNames',
     `
       ${extractAsyncFunction('restoreSettings')}
+      ${extractFunction('getConnection')}
       ${extractAsyncFunction('saveConnectionFields')}
       ${extractAsyncFunction('saveLearningFields')}
       return { restoreSettings, saveConnectionFields, saveLearningFields };
@@ -95,7 +89,6 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     chrome,
     loginEmailInput,
     loginPasswordInput,
-    FormDataMock,
     savedConnectionFieldNames,
     savedLearningFieldNames
   );
@@ -121,6 +114,53 @@ test('side panel persists and restores both connection and OpenAI passwords', as
   assert.equal(fields.password.value, 'saved-sub2api-password');
   assert.equal(loginEmailInput.value, 'saved-openai@example.com');
   assert.equal(loginPasswordInput.value, 'saved-openai-password');
+});
+
+test('side panel keeps the connection values when full demo disables the form controls', async () => {
+  const fields = {
+    baseUrl: { value: 'https://sub2api.example.com/admin/accounts', disabled: true },
+    email: { value: 'admin@example.com', disabled: true },
+    password: { value: 'sub2api-password', disabled: true },
+    groupName: { value: 'codex error', disabled: true },
+  };
+  const writes = [];
+  const api = new Function(
+    'form',
+    'chrome',
+    `
+      ${extractFunction('getConnection')}
+      ${extractAsyncFunction('saveConnectionFields')}
+      return { getConnection, saveConnectionFields };
+    `
+  )({
+    elements: {
+      namedItem(name) {
+        return fields[name] || null;
+      },
+    },
+  }, {
+    storage: {
+      local: {
+        async set(value) {
+          writes.push(value);
+        },
+      },
+    },
+  });
+
+  assert.deepEqual(api.getConnection(), {
+    baseUrl: 'https://sub2api.example.com/admin/accounts',
+    email: 'admin@example.com',
+    password: 'sub2api-password',
+    groupName: 'codex error',
+  });
+  await api.saveConnectionFields();
+  assert.deepEqual(writes, [{
+    baseUrl: 'https://sub2api.example.com/admin/accounts',
+    email: 'admin@example.com',
+    password: 'sub2api-password',
+    groupName: 'codex error',
+  }]);
 });
 
 test('side panel explains a missing background response instead of showing a generic error', async () => {
@@ -207,6 +247,115 @@ test('side panel restores a temporary QQ verification code without reviving a cl
 
   assert.equal(verificationCodeInput.value, '');
   assert.deepEqual(removed, [QQ_VERIFICATION_CODE_STORAGE_KEY]);
+});
+
+test('full demo validates restored SUB2API settings before requesting site permissions', async () => {
+  const statuses = [];
+  let permissionRequested = false;
+  let queryRequested = false;
+  const api = new Function(
+    'setFullDemoBusy',
+    'setLearningStatus',
+    'ensureFullDemoPermissions',
+    'clearVerificationCode',
+    'sendLearningMessage',
+    'renderCallbackState',
+    'latestQuery',
+    'queryReauthAccounts',
+    'runFullDemoStep',
+    'getVerificationCode',
+    'waitForFullDemoCallback',
+    'console',
+    `
+      ${extractAsyncFunction('runFullDemo')}
+      return { runFullDemo };
+    `
+  )(
+    () => {},
+    (message, kind) => statuses.push({ message, kind }),
+    async () => {
+      permissionRequested = true;
+      throw new Error('完整演示尚未开始：请先填写 SUB2API 地址。');
+    },
+    async () => {},
+    async () => ({}),
+    () => {},
+    null,
+    async () => { queryRequested = true; },
+    async () => { throw new Error('steps should not run'); },
+    () => '',
+    async () => { throw new Error('callback should not be read'); },
+    { error() {} }
+  );
+
+  await api.runFullDemo();
+
+  assert.equal(permissionRequested, true);
+  assert.equal(queryRequested, false);
+  assert.match(statuses.at(-1).message, /请先填写 SUB2API 地址/);
+  assert.equal(statuses.at(-1).kind, 'error');
+});
+
+test('full demo permission setup waits for saved settings before reading the connection fields', async () => {
+  let resolveSettings;
+  const settingsRestorePromise = new Promise((resolve) => {
+    resolveSettings = resolve;
+  });
+  let connection = { baseUrl: '' };
+  const containsCalls = [];
+  const requestedOrigins = [];
+  const api = new Function(
+    'settingsRestorePromise',
+    'validateFullDemoConnection',
+    'getPermissionPattern',
+    'openAiLearningOrigins',
+    'qqMailOrigins',
+    'chrome',
+    `
+      ${extractAsyncFunction('ensureFullDemoPermissions')}
+      return { ensureFullDemoPermissions };
+    `
+  )(
+    settingsRestorePromise,
+    () => connection,
+    (baseUrl) => `https://${new URL(baseUrl).hostname}/*`,
+    ['https://*.openai.com/*'],
+    ['https://mail.qq.com/*'],
+    {
+      permissions: {
+        async contains(details) {
+          containsCalls.push(details);
+          return false;
+        },
+        async request(details) {
+          requestedOrigins.push(details.origins);
+          return true;
+        },
+      },
+    }
+  );
+
+  const pending = api.ensureFullDemoPermissions();
+  await Promise.resolve();
+  assert.equal(containsCalls.length, 0);
+
+  connection = { baseUrl: 'https://sub2api.example.com/admin/accounts' };
+  resolveSettings();
+  const result = await pending;
+
+  assert.equal(result, connection);
+  assert.deepEqual(containsCalls, [{
+    origins: [
+      'https://sub2api.example.com/*',
+      'https://*.openai.com/*',
+      'https://mail.qq.com/*',
+    ],
+  }]);
+  assert.deepEqual(requestedOrigins, [[
+    'https://sub2api.example.com/*',
+    'https://*.openai.com/*',
+    'https://mail.qq.com/*',
+  ]]);
 });
 
 test('full demo runs the existing learning actions in order and pushes the callback result last', async () => {

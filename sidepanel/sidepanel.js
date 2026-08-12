@@ -46,6 +46,7 @@ const learningActionLabels = {
 let latestQuery = null;
 let verificationCodeRestoreGeneration = 0;
 let fullDemoRunning = false;
+let settingsRestorePromise = Promise.resolve();
 
 function setBusy(isBusy) {
   button.disabled = isBusy || fullDemoRunning;
@@ -132,13 +133,7 @@ async function restoreVerificationCode() {
 }
 
 async function saveConnectionFields() {
-  const values = new FormData(form);
-  await chrome.storage.local.set({
-    baseUrl: String(values.get('baseUrl') || '').trim(),
-    email: String(values.get('email') || '').trim(),
-    password: String(values.get('password') || ''),
-    groupName: String(values.get('groupName') || '').trim(),
-  });
+  await chrome.storage.local.set(getConnection());
 }
 
 async function saveLearningFields() {
@@ -164,12 +159,11 @@ async function clearVerificationCode() {
 }
 
 function getConnection() {
-  const values = new FormData(form);
   return {
-    baseUrl: String(values.get('baseUrl') || '').trim(),
-    email: String(values.get('email') || '').trim(),
-    password: String(values.get('password') || ''),
-    groupName: String(values.get('groupName') || '').trim(),
+    baseUrl: String(form.elements.namedItem('baseUrl')?.value || '').trim(),
+    email: String(form.elements.namedItem('email')?.value || '').trim(),
+    password: String(form.elements.namedItem('password')?.value || ''),
+    groupName: String(form.elements.namedItem('groupName')?.value || '').trim(),
   };
 }
 
@@ -260,19 +254,53 @@ async function ensureQqMailPermission() {
   }
 }
 
+function markInvalidConnectionField(fieldName) {
+  const input = form.elements.namedItem(fieldName);
+  if (!input) return;
+  input.setAttribute('aria-invalid', 'true');
+  input.focus();
+}
+
+function validateFullDemoConnection(connection = getConnection()) {
+  const requiredFields = [
+    ['baseUrl', 'SUB2API 地址'],
+    ['email', 'SUB2API 账号'],
+    ['password', 'SUB2API 密码'],
+    ['groupName', '分组'],
+  ];
+  const missing = requiredFields.find(([fieldName]) => !String(connection[fieldName] || '').trim());
+  if (missing) {
+    markInvalidConnectionField(missing[0]);
+    throw new Error(`完整演示尚未开始：请先填写 ${missing[1]}。`);
+  }
+
+  try {
+    normalizeInputUrl(connection.baseUrl);
+  } catch (error) {
+    markInvalidConnectionField('baseUrl');
+    throw error;
+  }
+
+  return connection;
+}
+
 async function ensureFullDemoPermissions() {
+  // 侧边栏刚打开时，storage 读取仍可能进行中；完整演示要等恢复完成后再读取表单。
+  await settingsRestorePromise;
+  const connection = validateFullDemoConnection();
   const origins = [...new Set([
-    getPermissionPattern(getConnection().baseUrl),
+    getPermissionPattern(connection.baseUrl),
     ...openAiLearningOrigins,
     ...qqMailOrigins,
   ])];
   const hasPermission = await chrome.permissions.contains({ origins });
-  if (hasPermission) return;
+  if (hasPermission) return connection;
 
   const granted = await chrome.permissions.request({ origins });
   if (!granted) {
     throw new Error('完整演示需要 SUB2API、OpenAI、localhost 和 QQ 邮箱的站点访问权限。');
   }
+  return connection;
 }
 
 async function sendLearningMessage(message) {
@@ -509,20 +537,24 @@ async function waitForFullDemoCallback() {
   throw new Error('完整演示停在第 9 步：等待 localhost 回调超时。');
 }
 
-function setFullDemoBusy(isBusy) {
+function setFullDemoBusy(isBusy, { disableForm = true } = {}) {
   fullDemoRunning = isBusy;
   setLearningBusy(isBusy);
-  for (const element of form.querySelectorAll('input, button')) {
-    element.disabled = isBusy;
+  if (disableForm) {
+    for (const element of form.querySelectorAll('input, button')) {
+      element.disabled = isBusy;
+    }
   }
   setBusy(false);
 }
 
 async function runFullDemo() {
-  setFullDemoBusy(true);
+  // 保持输入框可用，直到前置校验完成；这样缺失字段可以获得焦点并滚动到可见位置。
+  setFullDemoBusy(true, { disableForm: false });
   try {
-    setLearningStatus('完整演示：正在检查站点访问权限…', 'pending');
+    setLearningStatus('完整演示：正在恢复已保存的配置并检查前置条件…', 'pending');
     await ensureFullDemoPermissions();
+    setFullDemoBusy(true);
     await clearVerificationCode();
     const clearedCallback = await sendLearningMessage({ type: 'CLEAR_OPENAI_CALLBACK_CAPTURE' });
     renderCallbackState(clearedCallback);
@@ -601,7 +633,10 @@ form.addEventListener('submit', queryAccounts);
 form.addEventListener('input', (event) => {
   latestQuery = null;
   renderPreparedAccount();
-  if (savedConnectionFieldNames.includes(event.target.name)) saveConnectionFields().catch(() => {});
+  if (savedConnectionFieldNames.includes(event.target.name)) {
+    event.target.removeAttribute('aria-invalid');
+    saveConnectionFields().catch(() => {});
+  }
 });
 loginEmailInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
 loginPasswordInput.addEventListener('input', () => saveLearningFields().catch(() => {}));
@@ -617,6 +652,8 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-restoreSettings().catch(() => {});
+settingsRestorePromise = restoreSettings().catch((error) => {
+  console.warn('[sub2api reauth] 无法恢复已保存的配置：', error);
+});
 restoreVerificationCode().catch(() => {});
 refreshCallbackState().catch(() => {});

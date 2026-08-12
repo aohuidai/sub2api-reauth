@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-test('side panel exposes a single full-demo command', async () => {
+test('side panel exposes a single full-demo command and keeps its layout inside a resizable side panel', async () => {
   const [html, css] = await Promise.all([
     readFile(new URL('../sidepanel/sidepanel.html', import.meta.url), 'utf8'),
     readFile(new URL('../sidepanel/sidepanel.css', import.meta.url), 'utf8'),
@@ -11,4 +11,10 @@ test('side panel exposes a single full-demo command', async () => {
   assert.match(html, /id="run-full-demo"/);
   assert.match(html, />演示完整流程</);
   assert.match(css, /\.full-demo-button/);
+  assert.match(css, /html,\s*body\s*\{[\s\S]*?width:\s*100%[\s\S]*?min-width:\s*0/);
+  assert.doesNotMatch(css, /body\s*\{[\s\S]*?min-width:\s*320px/);
+  assert.doesNotMatch(css, /body\s*\{[\s\S]*?overflow-x:\s*hidden/);
+  assert.match(css, /\.app-shell\s*\{[\s\S]*?width:\s*100%[\s\S]*?min-width:\s*0/);
+  assert.doesNotMatch(css, /\.app-shell\s*\{[\s\S]*?max-width:\s*720px/);
+  assert.match(css, /@media \(max-width:\s*540px\)[\s\S]*?\.step-controls\s*\{[\s\S]*?grid-template-columns:\s*1fr/);
 });
