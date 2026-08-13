@@ -531,6 +531,10 @@ async function waitForOpenAiOauthProgress(expectedUrl, { runId = '' } = {}) {
   });
 }
 
+async function waitForOpenAiPasswordPage({ runId = '' } = {}) {
+  return sendLearningMessage({ type: 'WAIT_FOR_OPENAI_PASSWORD_PAGE', runId });
+}
+
 async function handleLearningAction(action, {
   useOpenAiAuthTab = false,
   account = null,
@@ -548,8 +552,13 @@ async function handleLearningAction(action, {
     }
     case 'continue-after-email': {
       const result = await runPageLearningStep(action, {}, { useOpenAiAuthTab, runId });
-      setLearningStatus(formatActionResult(result, '已点击邮箱页的继续按钮。'), 'success');
-      return result;
+      setLearningStatus('已点击邮箱页的继续按钮，正在等待密码页加载…', 'pending');
+      const passwordPage = await waitForOpenAiPasswordPage({ runId });
+      if (!passwordPage.ready) {
+        throw new Error('邮箱页的继续已点击，但密码页尚未出现。');
+      }
+      setLearningStatus('已进入密码页，可以填写密码。', 'success');
+      return { ...result, passwordPage };
     }
     case 'fill-password': {
       await saveLearningFields();
@@ -654,7 +663,7 @@ function isFullDemoStoppedError(error) {
 }
 
 function isRetryableDemoError(error) {
-  return /无法连接当前页面|当前页面没有可见|未找到.*(?:输入框|继续|提交|授权)|页面步骤未完成|当前页面不是 OAuth|OAuth 授权(?:点击未生效|确认页尚未稳定|页.*没有可点击尺寸)/i.test(
+  return /无法连接当前页面|当前页面没有可见|未找到.*(?:输入框|继续|提交|授权)|页面步骤未完成|密码页尚未出现|当前页面不是 OAuth|OAuth 授权(?:点击未生效|确认页尚未稳定|页.*没有可点击尺寸)/i.test(
     String(error?.message || error || '')
   );
 }

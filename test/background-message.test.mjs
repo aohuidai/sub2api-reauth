@@ -291,6 +291,75 @@ test('service worker keeps full-demo page actions on the prepared OpenAI tab', a
   }
 });
 
+test('service worker waits for the password input before confirming the email-page transition', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const previousSetTimeout = globalThis.setTimeout;
+  const listeners = {};
+  const injected = [];
+  let pageStateRequests = 0;
+  const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      get: async (tabId) => {
+        assert.equal(tabId, 42);
+        return { id: 42, url: 'https://auth.openai.com/log-in' };
+      },
+      sendMessage: async (tabId, message) => {
+        assert.equal(tabId, 42);
+        assert.deepEqual(message, { type: 'GET_OPENAI_LOGIN_PAGE_STATE_V2' });
+        pageStateRequests += 1;
+        return {
+          ok: true,
+          result: {
+            url: 'https://auth.openai.com/log-in',
+            passwordPageReady: pageStateRequests >= 2,
+          },
+        };
+      },
+      onUpdated: { addListener(listener) { listeners.onTabUpdated = listener; } },
+    },
+    scripting: {
+      executeScript: async (details) => injected.push(details),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-password-page-ready`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'WAIT_FOR_OPENAI_PASSWORD_PAGE',
+      runId: 'demo-password-page',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      ready: true,
+      url: 'https://auth.openai.com/log-in',
+    });
+    assert.equal(pageStateRequests, 2);
+    assert.deepEqual(injected, [
+      { target: { tabId: 42 }, files: ['content/openai-login-learning.js'] },
+      { target: { tabId: 42 }, files: ['content/openai-login-learning.js'] },
+    ]);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+    globalThis.setTimeout = previousSetTimeout;
+  }
+});
+
 test('service worker uses the dedicated stable OAuth click command for step 8', async () => {
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;

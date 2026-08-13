@@ -23,6 +23,8 @@ const QQ_MAIL_OPEN_TIMEOUT_MS = 12_000;
 const QQ_MAIL_OPEN_POLL_INTERVAL_MS = 250;
 const OPENAI_OAUTH_PROGRESS_TIMEOUT_MS = 8_000;
 const OPENAI_OAUTH_PROGRESS_POLL_INTERVAL_MS = 250;
+const OPENAI_PASSWORD_PAGE_TIMEOUT_MS = 15_000;
+const OPENAI_PASSWORD_PAGE_POLL_INTERVAL_MS = 250;
 const FULL_DEMO_STOPPED_ERROR = '完整演示已停止。';
 const cancelledLearningRunIds = new Set();
 const QQ_MAIL_URL_PATTERNS = [
@@ -50,6 +52,7 @@ const HANDLED_MESSAGE_TYPES = new Set([
   'GET_OPENAI_CALLBACK_CAPTURE',
   'CLEAR_OPENAI_CALLBACK_CAPTURE',
   'WAIT_FOR_OPENAI_OAUTH_PROGRESS',
+  'WAIT_FOR_OPENAI_PASSWORD_PAGE',
   'CANCEL_OPENAI_LEARNING_RUN',
   'CLOSE_OPENAI_LEARNING_ROUND',
 ]);
@@ -324,6 +327,55 @@ async function getOpenAiLearningPageState(tabId) {
     // Navigation may replace the page while this observation is in flight.
   }
   return fallback;
+}
+
+async function getOpenAiLoginPageState(tabId) {
+  const tab = typeof chrome.tabs?.get === 'function'
+    ? await chrome.tabs.get(tabId).catch(() => null)
+    : null;
+  const fallback = {
+    url: String(tab?.url || ''),
+    passwordPageReady: false,
+  };
+  if (!Number.isInteger(tabId)) return fallback;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content/openai-login-learning.js'],
+    });
+    const response = await chrome.tabs.sendMessage(tabId, {
+      type: 'GET_OPENAI_LOGIN_PAGE_STATE_V2',
+    });
+    if (response?.ok) {
+      return { ...fallback, ...(response.result || {}) };
+    }
+  } catch (_) {
+    // The login page can be replaced while its transition is still in flight.
+  }
+  return fallback;
+}
+
+async function waitForOpenAiPasswordPage(message = {}) {
+  const runId = normalizeLearningRunId(message.runId);
+  const authTabId = await getOpenAiAuthTabId();
+  if (!Number.isInteger(authTabId)) {
+    throw new Error('缺少 OpenAI 登录标签页，无法确认密码页是否已加载。');
+  }
+
+  const deadline = Date.now() + OPENAI_PASSWORD_PAGE_TIMEOUT_MS;
+  let latestState = null;
+  while (Date.now() < deadline) {
+    throwIfLearningRunCancelled(runId);
+    const pageState = await getOpenAiLoginPageState(authTabId);
+    latestState = pageState;
+    if (pageState.passwordPageReady) {
+      return { ready: true, url: pageState.url };
+    }
+    await sleep(OPENAI_PASSWORD_PAGE_POLL_INTERVAL_MS);
+  }
+
+  return { ready: false, url: latestState?.url || '' };
 }
 
 function isOpenAiOauthConsentUrl(value = '') {
@@ -724,6 +776,10 @@ async function handleMessage(message = {}) {
 
   if (message.type === 'WAIT_FOR_OPENAI_OAUTH_PROGRESS') {
     return { result: await waitForOpenAiOauthProgress(message) };
+  }
+
+  if (message.type === 'WAIT_FOR_OPENAI_PASSWORD_PAGE') {
+    return { result: await waitForOpenAiPasswordPage(message) };
   }
 
   if (message.type === 'CLEAR_OPENAI_CALLBACK_CAPTURE') {

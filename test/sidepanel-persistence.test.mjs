@@ -347,6 +347,69 @@ test('password continue opens QQ Mail first and does not submit the password wit
   }]);
 });
 
+test('email continue waits for the password page before it reports step 2 complete', async () => {
+  const events = [];
+  const statuses = [];
+  let resolvePasswordPage;
+  const passwordPage = new Promise((resolve) => {
+    resolvePasswordPage = resolve;
+  });
+  const api = new Function(
+    'runPageLearningStep',
+    'waitForOpenAiPasswordPage',
+    'setLearningStatus',
+    `
+      ${extractAsyncFunction('handleLearningAction')}
+      return { handleLearningAction };
+    `
+  )(
+    async (...args) => {
+      events.push({ type: 'click', args });
+      return { action: 'login-continue-clicked' };
+    },
+    async (...args) => {
+      events.push({ type: 'wait', args });
+      return passwordPage;
+    },
+    (message, kind) => statuses.push({ message, kind })
+  );
+
+  const pending = api.handleLearningAction('continue-after-email', {
+    useOpenAiAuthTab: true,
+    runId: 'demo-password-page',
+  });
+  await Promise.resolve();
+
+  assert.deepEqual(events, [
+    {
+      type: 'click',
+      args: ['continue-after-email', {}, { useOpenAiAuthTab: true, runId: 'demo-password-page' }],
+    },
+    {
+      type: 'wait',
+      args: [{ runId: 'demo-password-page' }],
+    },
+  ]);
+  assert.deepEqual(statuses, [{
+    message: '已点击邮箱页的继续按钮，正在等待密码页加载…',
+    kind: 'pending',
+  }]);
+
+  let settled = false;
+  pending.then(() => { settled = true; });
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  resolvePasswordPage({ ready: true, url: 'https://auth.openai.com/log-in' });
+  const result = await pending;
+
+  assert.equal(result.passwordPage.ready, true);
+  assert.deepEqual(statuses.at(-1), {
+    message: '已进入密码页，可以填写密码。',
+    kind: 'success',
+  });
+});
+
 test('OAuth continue retries instead of entering callback wait when its click has no effect', async () => {
   const statuses = [];
   const pageCalls = [];
@@ -437,6 +500,7 @@ test('full demo treats an unstable OAuth consent page as retryable', () => {
 
   assert.equal(api.isRetryableDemoError(new Error('OAuth 授权确认页尚未稳定，暂时不能点击“继续”。')), true);
   assert.equal(api.isRetryableDemoError(new Error('OAuth 授权页的“继续”按钮没有可点击尺寸。')), true);
+  assert.equal(api.isRetryableDemoError(new Error('邮箱页的继续已点击，但密码页尚未出现。')), true);
 });
 
 test('full demo progress displays the current mailbox and settled counts', () => {

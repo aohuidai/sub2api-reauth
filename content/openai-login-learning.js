@@ -1,7 +1,7 @@
 (() => {
   // executeScript 会在每次按钮点击时调用本文件。同一版本不重复注册；更新后的
   // 内容脚本可以替换当前标签页里的旧监听器，避免重新加载扩展后仍跑旧逻辑。
-  const CONTENT_SCRIPT_VERSION = 'oauth-consent-stable-v3';
+  const CONTENT_SCRIPT_VERSION = 'oauth-consent-stable-v4';
   if (globalThis.__sub2apiReauthOpenAiLearningVersion === CONTENT_SCRIPT_VERSION) return;
   const previousHandler = globalThis.__sub2apiReauthOpenAiLearningMessageHandler;
   if (previousHandler) chrome.runtime.onMessage.removeListener(previousHandler);
@@ -114,6 +114,13 @@
     if (!button) throw new Error('未找到登录页面的“继续”按钮。');
     button.click();
     return { action: 'login-continue-clicked', buttonText: getActionText(button), url: location.href };
+  }
+
+  function continueAfterEmail() {
+    if (getLoginPasswordInput()) {
+      return { action: 'password-page-ready', url: location.href, alreadyReady: true };
+    }
+    return clickLoginContinue();
   }
 
   /**
@@ -345,11 +352,19 @@
     };
   }
 
+  function getOpenAiLoginPageState() {
+    return {
+      url: location.href,
+      passwordPageReady: Boolean(getLoginPasswordInput()),
+    };
+  }
+
   function runLearningStep(action, value) {
     switch (action) {
       case 'fill-email':
         return step6_login({ email: value.email });
       case 'continue-after-email':
+        return continueAfterEmail();
       case 'continue-after-password':
         return step6_login();
       case 'fill-password':
@@ -378,6 +393,10 @@
     }
     if (message?.type === 'GET_OPENAI_LEARNING_PAGE_STATE') {
       sendResponse({ ok: true, result: getOpenAiLearningPageState() });
+      return false;
+    }
+    if (message?.type === 'GET_OPENAI_LOGIN_PAGE_STATE_V2') {
+      sendResponse({ ok: true, result: getOpenAiLoginPageState() });
       return false;
     }
     if (message?.type !== 'RUN_OPENAI_LEARNING_STEP') return undefined;
