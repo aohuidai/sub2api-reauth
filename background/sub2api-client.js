@@ -185,6 +185,7 @@ function buildAccountUpdatePayload(account = {}, credentials = {}, extra = {}) {
     load_factor: account.load_factor,
     priority: account.priority,
     rate_multiplier: account.rate_multiplier,
+    status: 'active',
     auto_pause_on_expired: account.auto_pause_on_expired,
     expires_at: account.expires_at,
   };
@@ -527,12 +528,20 @@ export function createSub2ApiClient({ fetchImpl = globalThis.fetch, timeoutMs = 
       body: {},
     }).catch(() => {});
 
+    // SUB2API 的错误状态和可调度开关是独立字段。重授权成功后显式恢复调度，
+    // 但不绕过限流或过载冷却这类运行时保护。
+    await requestJson(origin, `/api/v1/admin/accounts/${encodeURIComponent(accountId)}/schedulable`, {
+      method: 'POST',
+      token,
+      body: { schedulable: true },
+    });
+
     const email = getAccountEmail({ ...account, credentials });
     return {
       localhostUrl: callback.url,
       accountId,
       email,
-      status: `SUB2API 已重授权账号 #${accountId}${email ? `（${email}）` : ''}`,
+      status: `SUB2API 已重授权账号 #${accountId}${email ? `（${email}）` : ''}，已恢复调度。`,
     };
   }
 

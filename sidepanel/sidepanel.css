@@ -233,11 +233,46 @@ h2 {
   opacity: 0.64;
 }
 
-.full-demo-button {
+.full-demo-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.demo-rounds-field,
+.mail-wait-field {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.demo-rounds-field input,
+.mail-wait-field input {
   width: 100%;
+  min-height: 42px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  outline: none;
+  background: #0e1514;
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.demo-rounds-field input:focus,
+.mail-wait-field input:focus {
+  border-color: var(--teal);
+  box-shadow: 0 0 0 3px rgba(55, 200, 174, 0.15);
+}
+
+.full-demo-button,
+.stop-demo-button {
   max-width: 100%;
   min-height: 46px;
-  margin-top: 18px;
   border: 1px solid var(--teal-strong);
   border-radius: 7px;
   background: var(--teal-strong);
@@ -253,6 +288,102 @@ h2 {
 .full-demo-button:disabled {
   cursor: wait;
   opacity: 0.64;
+}
+
+.full-demo-progress {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 14px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.full-demo-progress-header,
+.full-demo-progress-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.full-demo-progress-title,
+.full-demo-progress-summary {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.full-demo-progress-count,
+.full-demo-progress-summary output {
+  color: var(--teal);
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+.full-demo-progress-track {
+  width: 100%;
+  min-height: 6px;
+  overflow: hidden;
+  background: var(--surface-raised);
+}
+
+.full-demo-progress-bar {
+  display: block;
+  width: 0;
+  min-height: 6px;
+  background: var(--teal-strong);
+  transition: width 160ms ease;
+}
+
+.full-demo-progress-phase {
+  min-width: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.full-demo-progress-summary {
+  justify-content: flex-start;
+  gap: 18px;
+}
+
+.stop-demo-button {
+  align-self: end;
+  padding: 0 14px;
+  border-color: rgba(228, 127, 118, 0.72);
+  background: transparent;
+  color: var(--danger);
+  font-weight: 700;
+}
+
+.stop-demo-button:hover:not(:disabled) {
+  background: rgba(228, 127, 118, 0.12);
+}
+
+.stop-demo-button:disabled {
+  cursor: wait;
+  opacity: 0.64;
+}
+
+@media (max-width: 540px) {
+  .full-demo-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .demo-rounds-field,
+  .mail-wait-field {
+    grid-column: 1 / -1;
+  }
+
+  .full-demo-progress-summary {
+    gap: 10px;
+  }
 }
 
 .results-header {

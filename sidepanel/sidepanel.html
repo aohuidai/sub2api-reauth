@@ -57,7 +57,7 @@
               <p class="eyebrow">结果</p>
               <h2 id="results-heading">待重授权账号</h2>
             </div>
-            <span id="result-count" class="result-count">0</span>
+            <span id="result-count" class="result-count" aria-label="当前获取邮箱总数">邮箱总数 0</span>
           </div>
 
           <div id="query-state" class="query-state">等待查询</div>
@@ -85,7 +85,32 @@
             <h2 id="learning-heading">OpenAI 登录与 OAuth 回调</h2>
           </div>
           <p class="section-copy">在 OpenAI 登录或授权标签页中，按顺序执行。SUB2API 和 OpenAI 密码会保存在本机 Chrome 配置中；QQ 邮箱只使用你已有的浏览器登录态。</p>
-          <button id="run-full-demo" type="button" class="full-demo-button">演示完整流程</button>
+          <div class="full-demo-controls">
+            <label class="demo-rounds-field" for="demo-rounds">
+              <span>演示轮数</span>
+              <input id="demo-rounds" type="number" min="1" max="50" step="1" value="1" inputmode="numeric">
+            </label>
+            <label class="mail-wait-field" for="mail-wait-seconds">
+              <span>邮箱等待时长（秒）</span>
+              <input id="mail-wait-seconds" type="number" min="1" max="600" step="1" value="60" inputmode="numeric">
+            </label>
+            <button id="run-full-demo" type="button" class="full-demo-button">演示完整流程</button>
+            <button id="stop-full-demo" type="button" class="stop-demo-button" hidden>停止演示</button>
+          </div>
+          <div id="full-demo-progress" class="full-demo-progress" role="status" aria-live="polite" hidden>
+            <div class="full-demo-progress-header">
+              <span class="full-demo-progress-title">邮箱进度</span>
+              <output id="full-demo-progress-count" class="full-demo-progress-count">0 / 0</output>
+            </div>
+            <div id="full-demo-progress-track" class="full-demo-progress-track" role="progressbar" aria-label="完整演示进度" aria-valuemin="0" aria-valuenow="0" aria-valuemax="0">
+              <span id="full-demo-progress-bar" class="full-demo-progress-bar"></span>
+            </div>
+            <p id="full-demo-progress-phase" class="full-demo-progress-phase">等待开始</p>
+            <div class="full-demo-progress-summary">
+              <span>已完成 <output id="full-demo-progress-completed">0</output></span>
+              <span>验证码缺失跳过 <output id="full-demo-progress-skipped">0</output></span>
+            </div>
+          </div>
           <p id="learning-status" class="learning-status" aria-live="polite">等待在 OpenAI 页面执行步骤。</p>
 
           <ol class="learning-steps">
@@ -190,7 +215,7 @@
             <li class="learning-step">
               <span class="flow-step" aria-hidden="true">10</span>
               <div class="step-content">
-                <div class="step-heading"><h3>推送重授权结果到 SUB2API</h3><p>交换回调 code，更新第 0 步选中的原账号凭据，并清除其旧错误状态。</p></div>
+                <div class="step-heading"><h3>推送重授权结果到 SUB2API</h3><p>交换回调 code，更新第 0 步选中的原账号凭据，并恢复其可调度状态。</p></div>
                 <button type="button" class="learning-button" data-learning-action="push-callback">推送到 SUB2API</button>
               </div>
             </li>

@@ -1,10 +1,18 @@
 (() => {
-  // executeScript 会在每次按钮点击时调用本文件。全局标记避免重复注册 message listener。
-  if (globalThis.__sub2apiReauthOpenAiLearningLoaded) return;
-  globalThis.__sub2apiReauthOpenAiLearningLoaded = true;
+  // executeScript 会在每次按钮点击时调用本文件。同一版本不重复注册；更新后的
+  // 内容脚本可以替换当前标签页里的旧监听器，避免重新加载扩展后仍跑旧逻辑。
+  const CONTENT_SCRIPT_VERSION = 'oauth-consent-stable-v3';
+  if (globalThis.__sub2apiReauthOpenAiLearningVersion === CONTENT_SCRIPT_VERSION) return;
+  const previousHandler = globalThis.__sub2apiReauthOpenAiLearningMessageHandler;
+  if (previousHandler) chrome.runtime.onMessage.removeListener(previousHandler);
+  globalThis.__sub2apiReauthOpenAiLearningVersion = CONTENT_SCRIPT_VERSION;
 
   const LOGIN_ACTION_PATTERN = /continue|next|sign\s*in|log\s*in|submit|继续|下一步|登录|続行|次へ|ログイン/i;
   const OAUTH_ACTION_PATTERN = /continue|allow|authorize|accept|继续|允许|授权|同意|続行/i;
+  const OAUTH_BUTTON_READY_TIMEOUT_MS = 12_000;
+  const OAUTH_BUTTON_SAMPLE_INTERVAL_MS = 200;
+  const OAUTH_BUTTON_STABLE_SAMPLES = 3;
+  const OAUTH_BUTTON_MIN_SETTLE_MS = 1_200;
 
   function isVisibleElement(element) {
     if (!(element instanceof HTMLElement)) return false;
@@ -24,6 +32,33 @@
       .map((value) => String(value || '').trim())
       .filter(Boolean)
       .join(' ');
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getSerializableRect(element) {
+    const rect = element?.getBoundingClientRect?.();
+    if (!rect || !rect.width || !rect.height) {
+      throw new Error('OAuth 授权页的“继续”按钮没有可点击尺寸。');
+    }
+    return {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      centerX: rect.left + (rect.width / 2),
+      centerY: rect.top + (rect.height / 2),
+    };
+  }
+
+  function isSameRect(left, right) {
+    return Boolean(left && right)
+      && Math.abs(left.left - right.left) < 1
+      && Math.abs(left.top - right.top) < 1
+      && Math.abs(left.width - right.width) < 1
+      && Math.abs(left.height - right.height) < 1;
   }
 
   function findFirstVisible(selector) {
@@ -209,24 +244,105 @@
       || (text.includes('codex') && text.includes('chatgpt') && Boolean(getPrimaryContinueButton()));
   }
 
-  // FlowPilot 对应函数：step8_findAndClick，教学版先暴露“查找”这一小步。
-  function step8_findAndClick() {
-    if (!isOAuthConsentPage()) throw new Error('当前页面不是 OAuth 授权确认页。');
-    const button = getPrimaryContinueButton();
-    if (!button) throw new Error('未找到 OAuth 授权页的“继续”按钮。');
-    return { button, buttonText: getActionText(button), url: location.href };
+  async function prepareOAuthContinueButton() {
+    const deadline = Date.now() + OAUTH_BUTTON_READY_TIMEOUT_MS;
+    let previousButton = null;
+    let previousRect = null;
+    let stableSamples = 0;
+    let readySince = 0;
+
+    while (Date.now() < deadline) {
+      const button = isOAuthConsentPage() ? getPrimaryContinueButton() : null;
+      if (!button || !isActionEnabled(button)) {
+        previousButton = null;
+        previousRect = null;
+        stableSamples = 0;
+        readySince = 0;
+        await sleep(OAUTH_BUTTON_SAMPLE_INTERVAL_MS);
+        continue;
+      }
+
+      if (button !== previousButton) {
+        button.scrollIntoView?.({ behavior: 'auto', block: 'center', inline: 'center' });
+        button.focus?.();
+      }
+      const rect = getSerializableRect(button);
+      if (button === previousButton && isSameRect(previousRect, rect)) {
+        stableSamples += 1;
+      } else {
+        previousButton = button;
+        readySince = Date.now();
+        stableSamples = 1;
+      }
+      previousRect = rect;
+
+      if (
+        stableSamples >= OAUTH_BUTTON_STABLE_SAMPLES
+        && Date.now() - readySince >= OAUTH_BUTTON_MIN_SETTLE_MS
+      ) {
+        return { button, rect };
+      }
+      await sleep(OAUTH_BUTTON_SAMPLE_INTERVAL_MS);
+    }
+
+    throw new Error('OAuth 授权确认页尚未稳定，暂时不能点击“继续”。');
   }
 
-  // FlowPilot 对应函数：step8_triggerContinue。
-  function step8_triggerContinue() {
-    const result = step8_findAndClick();
-    const form = result.button.form || result.button.closest('form');
-    if (form && typeof form.requestSubmit === 'function') {
-      form.requestSubmit(result.button);
-    } else {
-      result.button.click();
+  async function step8_findAndClick() {
+    const result = await prepareOAuthContinueButton();
+    return {
+      action: 'oauth-continue-ready',
+      rect: result.rect,
+      buttonText: getActionText(result.button),
+      url: location.href,
+    };
+  }
+
+  // FlowPilot 对应函数：step8_triggerContinue。先等按钮、表单与版面稳定，再触发；
+  // 完整演示会在未生效时换一种 DOM 提交方式重试。
+  async function step8_triggerContinue(payload = {}) {
+    const strategy = String(payload.strategy || 'requestSubmit');
+    const prepared = await prepareOAuthContinueButton();
+    const button = prepared.button;
+    const form = button.form || button.closest('form');
+
+    switch (strategy) {
+      case 'requestSubmit':
+        if (form && typeof form.requestSubmit === 'function') {
+          form.requestSubmit(button);
+        } else {
+          button.click();
+        }
+        break;
+      case 'nativeClick':
+        button.click();
+        break;
+      case 'dispatchClick':
+        button.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        button.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        button.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+        break;
+      default:
+        throw new Error(`未知的 OAuth 授权点击方式：${strategy}。`);
     }
-    return { action: 'oauth-continue-triggered', buttonText: result.buttonText, url: result.url };
+
+    return {
+      rect: prepared.rect,
+      buttonText: getActionText(button),
+      url: location.href,
+      action: 'oauth-continue-triggered',
+      clickStrategy: strategy,
+    };
+  }
+
+  function getOpenAiLearningPageState() {
+    const oauthConsentPage = isOAuthConsentPage();
+    const consentReady = oauthConsentPage && Boolean(getPrimaryContinueButton());
+    return {
+      url: location.href,
+      oauthConsentPage,
+      oauthConsentReady: consentReady,
+    };
   }
 
   function runLearningStep(action, value) {
@@ -243,20 +359,34 @@
       case 'submit-code':
         return clickVerificationContinue();
       case 'oauth-continue':
-        return step8_triggerContinue();
+        return step8_triggerContinue(value);
       default:
         throw new Error('未知的学习步骤。');
     }
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const messageHandler = (message, _sender, sendResponse) => {
+    if (message?.type === 'GET_OPENAI_OAUTH_PAGE_STATE_V2') {
+      sendResponse({ ok: true, result: getOpenAiLearningPageState() });
+      return false;
+    }
+    if (message?.type === 'RUN_OPENAI_OAUTH_CONTINUE_V2') {
+      Promise.resolve(step8_triggerContinue(message.value || {}))
+        .then((result) => sendResponse({ ok: true, result }))
+        .catch((error) => sendResponse({ ok: false, error: String(error?.message || '页面步骤未完成。') }));
+      return true;
+    }
+    if (message?.type === 'GET_OPENAI_LEARNING_PAGE_STATE') {
+      sendResponse({ ok: true, result: getOpenAiLearningPageState() });
+      return false;
+    }
     if (message?.type !== 'RUN_OPENAI_LEARNING_STEP') return undefined;
 
-    try {
-      sendResponse({ ok: true, result: runLearningStep(message.action, message.value || {}) });
-    } catch (error) {
-      sendResponse({ ok: false, error: String(error?.message || '页面步骤未完成。') });
-    }
+    Promise.resolve(runLearningStep(message.action, message.value || {}))
+      .then((result) => sendResponse({ ok: true, result }))
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || '页面步骤未完成。') }));
     return true;
-  });
+  };
+  globalThis.__sub2apiReauthOpenAiLearningMessageHandler = messageHandler;
+  chrome.runtime.onMessage.addListener(messageHandler);
 })();

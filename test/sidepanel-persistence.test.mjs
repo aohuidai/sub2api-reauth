@@ -9,7 +9,9 @@ function extractFunction(name, { async = false } = {}) {
   const start = source.indexOf(marker);
   if (start < 0) throw new Error(`Missing function ${name}`);
 
-  const bodyStart = source.indexOf('{', start);
+  const signatureEnd = source.indexOf(') {', start);
+  if (signatureEnd < 0) throw new Error(`Missing function body for ${name}`);
+  const bodyStart = source.indexOf('{', signatureEnd);
   let depth = 0;
   for (let index = bodyStart; index < source.length; index += 1) {
     if (source[index] === '{') depth += 1;
@@ -47,6 +49,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
   };
   const loginEmailInput = { value: 'openai@example.com' };
   const loginPasswordInput = { value: 'openai-password' };
+  const mailWaitSecondsInput = { value: '60' };
   const writes = [];
   const saved = {
     baseUrl: 'https://saved.example.com',
@@ -55,6 +58,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     groupName: 'saved group',
     loginEmail: 'saved-openai@example.com',
     loginPassword: 'saved-openai-password',
+    mailWaitSeconds: '90',
   };
   const chrome = {
     storage: {
@@ -75,6 +79,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     'chrome',
     'loginEmailInput',
     'loginPasswordInput',
+    'mailWaitSecondsInput',
     'savedConnectionFieldNames',
     'savedLearningFieldNames',
     `
@@ -89,6 +94,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     chrome,
     loginEmailInput,
     loginPasswordInput,
+    mailWaitSecondsInput,
     savedConnectionFieldNames,
     savedLearningFieldNames
   );
@@ -105,6 +111,7 @@ test('side panel persists and restores both connection and OpenAI passwords', as
     {
       loginEmail: 'openai@example.com',
       loginPassword: 'openai-password',
+      mailWaitSeconds: '60',
     },
   ]);
 
@@ -114,6 +121,66 @@ test('side panel persists and restores both connection and OpenAI passwords', as
   assert.equal(fields.password.value, 'saved-sub2api-password');
   assert.equal(loginEmailInput.value, 'saved-openai@example.com');
   assert.equal(loginPasswordInput.value, 'saved-openai-password');
+  assert.equal(mailWaitSecondsInput.value, '90');
+});
+
+test('side panel validates and forwards the configured QQ mailbox wait time', async () => {
+  const verificationCodeInput = { value: '', focus() {} };
+  const mailWaitSecondsInput = { value: '75', focus() {} };
+  const sent = [];
+  const statuses = [];
+  const api = new Function(
+    'clearVerificationCode',
+    'ensureQqMailPermission',
+    'getMailboxWaitSeconds',
+    'setLearningStatus',
+    'sendLearningMessage',
+    'verificationCodeInput',
+    'saveVerificationCode',
+    `
+      ${extractAsyncFunction('fetchQqOpenAiLoginCode')}
+      return { fetchQqOpenAiLoginCode };
+    `
+  )(
+    async () => {},
+    async () => {},
+    () => Number(mailWaitSecondsInput.value),
+    (message, kind) => statuses.push({ message, kind }),
+    async (message) => {
+      sent.push(message);
+      return { code: '123456' };
+    },
+    verificationCodeInput,
+    async () => {}
+  );
+
+  const result = await api.fetchQqOpenAiLoginCode({ runId: 'demo-1' });
+
+  assert.equal(result.code, '123456');
+  assert.deepEqual(sent, [{
+    type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
+    runId: 'demo-1',
+    mailWaitSeconds: 75,
+  }]);
+  assert.match(statuses[0].message, /最长 75 秒/);
+});
+
+test('side panel rejects an invalid QQ mailbox wait time', () => {
+  const mailWaitSecondsInput = {
+    value: '0',
+    focused: false,
+    focus() { this.focused = true; },
+  };
+  const api = new Function(
+    'mailWaitSecondsInput',
+    `
+      ${extractFunction('getMailboxWaitSeconds')}
+      return { getMailboxWaitSeconds };
+    `
+  )(mailWaitSecondsInput);
+
+  assert.throws(() => api.getMailboxWaitSeconds(), /1 到 600/);
+  assert.equal(mailWaitSecondsInput.focused, true);
 });
 
 test('side panel keeps the connection values when full demo disables the form controls', async () => {
@@ -249,12 +316,207 @@ test('side panel restores a temporary QQ verification code without reviving a cl
   assert.deepEqual(removed, [QQ_VERIFICATION_CODE_STORAGE_KEY]);
 });
 
-test('full demo validates restored SUB2API settings before requesting site permissions', async () => {
+test('password continue opens QQ Mail first and does not submit the password without a mailbox baseline', async () => {
   const statuses = [];
-  let permissionRequested = false;
-  let queryRequested = false;
+  let pageStepCalls = 0;
   const api = new Function(
-    'setFullDemoBusy',
+    'captureQqMailBaseline',
+    'runPageLearningStep',
+    'setLearningStatus',
+    'formatActionResult',
+    `
+      ${extractAsyncFunction('handleLearningAction')}
+      return { handleLearningAction };
+    `
+  )(
+    async () => ({ available: false, needsLogin: true, openedMailTab: true }),
+    async () => { pageStepCalls += 1; return {}; },
+    (message, kind) => statuses.push({ message, kind }),
+    (_result, fallback) => fallback
+  );
+
+  const result = await api.handleLearningAction('continue-after-password');
+
+  assert.deepEqual(result, {
+    baseline: { available: false, needsLogin: true, openedMailTab: true },
+  });
+  assert.equal(pageStepCalls, 0);
+  assert.deepEqual(statuses, [{
+    message: '已自动打开 QQ 邮箱，请完成登录并进入收件箱后重新点击第 4 步。',
+    kind: 'pending',
+  }]);
+});
+
+test('OAuth continue retries instead of entering callback wait when its click has no effect', async () => {
+  const statuses = [];
+  const pageCalls = [];
+  const api = new Function(
+    'armCallbackCapture',
+    'runPageLearningStep',
+    'waitForOpenAiOauthProgress',
+    'setLearningStatus',
+    'formatActionResult',
+    `
+      ${extractAsyncFunction('handleLearningAction')}
+      return { handleLearningAction };
+    `
+  )(
+    async () => ({}),
+    async (...args) => {
+      pageCalls.push(args);
+      return { url: 'https://auth.openai.com/consent' };
+    },
+    async () => ({ progressed: false }),
+    (message, kind) => statuses.push({ message, kind }),
+    (_result, fallback) => fallback
+  );
+
+  await assert.rejects(
+    api.handleLearningAction('oauth-continue', { oauthStrategy: 'nativeClick' }),
+    /OAuth 授权点击未生效/
+  );
+  assert.deepEqual(pageCalls, [[
+    'oauth-continue',
+    { strategy: 'nativeClick' },
+    { useOpenAiAuthTab: false, runId: '' },
+  ]]);
+  assert.deepEqual(statuses, []);
+});
+
+test('full demo retries OAuth with a different click strategy before it waits for the callback', async () => {
+  const calls = [];
+  const api = new Function(
+    'throwIfFullDemoStopped',
+    'setLearningStatus',
+    'learningActionLabels',
+    'handleLearningAction',
+    'waitForFullDemoDelay',
+    'isFullDemoStoppedError',
+    'isRetryableDemoError',
+    'FULL_DEMO_PAGE_RETRY_COUNT',
+    'FULL_DEMO_PAGE_RETRY_DELAY_MS',
+    'FULL_DEMO_STEP_DELAY_MS',
+    'FULL_DEMO_OAUTH_CLICK_STRATEGIES',
+    'setFullDemoProgress',
+    `
+      ${extractAsyncFunction('runFullDemoStep')}
+      return { runFullDemoStep };
+    `
+  )(
+    () => {},
+    () => {},
+    {},
+    async (_action, options) => {
+      calls.push(options.oauthStrategy);
+      if (calls.length < 3) throw new Error('OAuth 授权点击未生效，页面仍停留在授权确认页。');
+      return { accepted: true };
+    },
+    async () => {},
+    () => false,
+    (error) => /OAuth 授权点击未生效/.test(error.message),
+    3,
+    0,
+    0,
+    ['requestSubmit', 'nativeClick', 'dispatchClick'],
+    () => {}
+  );
+
+  const result = await api.runFullDemoStep(8, 'oauth-continue', { retry: true, runId: 'run-1' });
+
+  assert.deepEqual(calls, ['requestSubmit', 'nativeClick', 'dispatchClick']);
+  assert.deepEqual(result, { accepted: true });
+});
+
+test('full demo treats an unstable OAuth consent page as retryable', () => {
+  const api = new Function(
+    `
+      ${extractFunction('isRetryableDemoError')}
+      return { isRetryableDemoError };
+    `
+  )();
+
+  assert.equal(api.isRetryableDemoError(new Error('OAuth 授权确认页尚未稳定，暂时不能点击“继续”。')), true);
+  assert.equal(api.isRetryableDemoError(new Error('OAuth 授权页的“继续”按钮没有可点击尺寸。')), true);
+});
+
+test('full demo progress displays the current mailbox and settled counts', () => {
+  const panel = { hidden: true };
+  const count = { textContent: '' };
+  const phase = { textContent: '' };
+  const completed = { textContent: '' };
+  const skipped = { textContent: '' };
+  const attributes = {};
+  const track = {
+    setAttribute(name, value) {
+      attributes[name] = value;
+    },
+  };
+  const bar = { style: {} };
+  const api = new Function(
+    'fullDemoProgressPanel',
+    'fullDemoProgressCount',
+    'fullDemoProgressTrack',
+    'fullDemoProgressBar',
+    'fullDemoProgressPhase',
+    'fullDemoProgressCompleted',
+    'fullDemoProgressSkipped',
+    `
+      let fullDemoProgressState = {
+        total: 0,
+        current: 0,
+        completed: 0,
+        skipped: 0,
+        phase: '等待开始',
+      };
+      ${extractFunction('renderFullDemoProgress')}
+      ${extractFunction('resetFullDemoProgress')}
+      ${extractFunction('setFullDemoProgress')}
+      return { resetFullDemoProgress, setFullDemoProgress };
+    `
+  )(panel, count, track, bar, phase, completed, skipped);
+
+  api.resetFullDemoProgress(5);
+  api.setFullDemoProgress({
+    current: 3,
+    completed: 1,
+    skipped: 1,
+    phase: '第 5 步未获取到验证码，已跳过邮箱 #12',
+  });
+
+  assert.equal(panel.hidden, false);
+  assert.equal(count.textContent, '3 / 5');
+  assert.equal(phase.textContent, '第 5 步未获取到验证码，已跳过邮箱 #12');
+  assert.equal(completed.textContent, '1');
+  assert.equal(skipped.textContent, '1');
+  assert.equal(attributes['aria-valuemax'], '5');
+  assert.equal(attributes['aria-valuenow'], '2');
+  assert.equal(bar.style.width, '40%');
+});
+
+function createFullDemoHarness({
+  accounts = [{ id: 10, email: 'first@example.com' }],
+  rounds = 1,
+  callbackUrl = 'http://localhost:1455/auth/callback?code=test&state=state',
+  onAction = async (action) => {
+    if (action === 'continue-after-password') return { baseline: { available: true } };
+    if (action === 'fetch-qq-code') return { code: '111111' };
+    return {};
+  },
+  ensureFullDemoPermissions = async () => {},
+} = {}) {
+  const actions = [];
+  const messages = [];
+  const statuses = [];
+  const busyStates = [];
+  const progressUpdates = [];
+  const closedRounds = [];
+  const demoRoundsInput = {
+    value: String(rounds),
+    focus() {},
+  };
+  const verificationCodeInput = { value: '' };
+  const stopFullDemoButton = { disabled: false, hidden: true };
+  const api = new Function(
     'setLearningStatus',
     'ensureFullDemoPermissions',
     'clearVerificationCode',
@@ -262,38 +524,117 @@ test('full demo validates restored SUB2API settings before requesting site permi
     'renderCallbackState',
     'latestQuery',
     'queryReauthAccounts',
-    'runFullDemoStep',
+    'handleLearningAction',
     'getVerificationCode',
-    'waitForFullDemoCallback',
+    'waitForOpenAiOauthProgress',
     'console',
+    'demoRoundsInput',
+    'verificationCodeInput',
+    'stopFullDemoButton',
+    'form',
+    'setLearningBusy',
+    'setBusy',
+    'resetFullDemoProgress',
+    'setFullDemoProgress',
+    'closeFullDemoRound',
     `
+      const FULL_DEMO_PAGE_RETRY_COUNT = 2;
+      const FULL_DEMO_PAGE_RETRY_DELAY_MS = 0;
+      const FULL_DEMO_CALLBACK_TIMEOUT_MS = 100;
+      const FULL_DEMO_STEP_DELAY_MS = 0;
+      const FULL_DEMO_OAUTH_CONSENT_SETTLE_MS = 0;
+      const FULL_DEMO_OAUTH_CLICK_STRATEGIES = ['requestSubmit', 'nativeClick', 'dispatchClick'];
+      const FULL_DEMO_STOPPED_ERROR = '完整演示已停止。';
+      const learningActionLabels = {};
+      let fullDemoRunning = false;
+      let fullDemoRunId = '';
+      let fullDemoStopRequested = false;
+      let fullDemoDelayWake = null;
+      ${extractFunction('createFullDemoRunId')}
+      ${extractFunction('getDemoRounds')}
+      ${extractFunction('isCurrentFullDemoRun')}
+      ${extractFunction('throwIfFullDemoStopped')}
+      ${extractFunction('waitForFullDemoDelay')}
+      ${extractFunction('isFullDemoStoppedError')}
+      ${extractFunction('isRetryableDemoError')}
+      ${extractFunction('isMissingVerificationCodeError')}
+      ${extractAsyncFunction('runFullDemoStep')}
+      ${extractAsyncFunction('waitForFullDemoCallback')}
+      ${extractFunction('setFullDemoBusy')}
+      ${extractAsyncFunction('runFullDemoForAccount')}
       ${extractAsyncFunction('runFullDemo')}
-      return { runFullDemo };
+      ${extractAsyncFunction('stopFullDemo')}
+      function armForStop(runId) {
+        fullDemoRunning = true;
+        fullDemoRunId = runId;
+        fullDemoStopRequested = false;
+      }
+      return {
+        runFullDemo,
+        runFullDemoStep,
+        stopFullDemo,
+        waitForFullDemoDelay,
+        armForStop,
+        snapshot: () => ({ fullDemoRunning, fullDemoRunId, fullDemoStopRequested }),
+      };
     `
   )(
-    () => {},
     (message, kind) => statuses.push({ message, kind }),
-    async () => {
+    ensureFullDemoPermissions,
+    async () => { verificationCodeInput.value = ''; },
+    async (message) => {
+      messages.push(message);
+      if (message.type === 'GET_OPENAI_CALLBACK_CAPTURE') return { callbackUrl };
+      return {};
+    },
+    () => {},
+    { accounts },
+    async () => { throw new Error('query should not run'); },
+    async (action, options) => {
+      actions.push({ action, options });
+      return onAction(action, options);
+    },
+    () => '111111',
+    async () => ({ progressed: true }),
+    { error() {}, warn() {} },
+    demoRoundsInput,
+    verificationCodeInput,
+    stopFullDemoButton,
+    { querySelectorAll() { return []; } },
+    (isBusy) => busyStates.push(isBusy),
+    () => {},
+    (total = 0) => progressUpdates.push({ type: 'reset', total }),
+    (update = {}) => progressUpdates.push({ type: 'update', ...update }),
+    async (runId) => closedRounds.push(runId)
+  );
+
+  return {
+    actions,
+    api,
+    busyStates,
+    closedRounds,
+    messages,
+    progressUpdates,
+    statuses,
+    stopFullDemoButton,
+  };
+}
+
+test('full demo validates restored SUB2API settings before requesting site permissions', async () => {
+  let permissionRequested = false;
+  const harness = createFullDemoHarness({
+    ensureFullDemoPermissions: async () => {
       permissionRequested = true;
       throw new Error('完整演示尚未开始：请先填写 SUB2API 地址。');
     },
-    async () => {},
-    async () => ({}),
-    () => {},
-    null,
-    async () => { queryRequested = true; },
-    async () => { throw new Error('steps should not run'); },
-    () => '',
-    async () => { throw new Error('callback should not be read'); },
-    { error() {} }
-  );
+  });
 
-  await api.runFullDemo();
+  await harness.api.runFullDemo();
 
   assert.equal(permissionRequested, true);
-  assert.equal(queryRequested, false);
-  assert.match(statuses.at(-1).message, /请先填写 SUB2API 地址/);
-  assert.equal(statuses.at(-1).kind, 'error');
+  assert.equal(harness.actions.length, 0);
+  assert.match(harness.statuses.at(-1).message, /请先填写 SUB2API 地址/);
+  assert.equal(harness.statuses.at(-1).kind, 'error');
 });
 
 test('full demo permission setup waits for saved settings before reading the connection fields', async () => {
@@ -358,106 +699,153 @@ test('full demo permission setup waits for saved settings before reading the con
   ]]);
 });
 
-test('full demo runs the existing learning actions in order and pushes the callback result last', async () => {
-  const steps = [];
-  const statuses = [];
-  const api = new Function(
-    'setFullDemoBusy',
-    'setLearningStatus',
-    'ensureFullDemoPermissions',
-    'clearVerificationCode',
-    'sendLearningMessage',
-    'renderCallbackState',
-    'latestQuery',
-    'queryReauthAccounts',
-    'runFullDemoStep',
-    'getVerificationCode',
-    'waitForFullDemoCallback',
-    'console',
-    `
-      ${extractAsyncFunction('runFullDemo')}
-      return { runFullDemo };
-    `
-  )(
-    () => {},
-    (message, kind) => statuses.push({ message, kind }),
-    async () => {},
-    async () => {},
-    async () => ({}),
-    () => {},
-    { accounts: [{ id: 10 }] },
-    async () => { throw new Error('query should not run'); },
-    async (step, action) => {
-      steps.push([step, action]);
+test('full demo processes the requested number of accounts from the start', async () => {
+  const accounts = [
+    { id: 10, email: 'one@example.com' },
+    { id: 11, email: 'two@example.com' },
+    { id: 12, email: 'three@example.com' },
+  ];
+  const harness = createFullDemoHarness({ accounts, rounds: 3 });
+
+  await harness.api.runFullDemo();
+
+  const expectedActions = [
+    'open-first-reauth',
+    'fill-email',
+    'continue-after-email',
+    'fill-password',
+    'continue-after-password',
+    'fetch-qq-code',
+    'fill-code',
+    'submit-code',
+    'oauth-continue',
+    'push-callback',
+  ];
+  assert.deepEqual(
+    accounts.map((account) => harness.actions
+      .filter((entry) => entry.options.account.id === account.id)
+      .map((entry) => entry.action)),
+    [expectedActions, expectedActions, expectedActions]
+  );
+  assert.match(harness.statuses.at(-1).message, /已重授权 3 个账号/);
+  assert.equal(harness.closedRounds.length, 3);
+  assert.equal(new Set(harness.closedRounds).size, 1);
+});
+
+test('full demo skips a mailbox with no fresh code and continues to the next mailbox', async () => {
+  const accounts = [
+    { id: 10, email: 'no-code@example.com' },
+    { id: 11, email: 'has-code@example.com' },
+  ];
+  const harness = createFullDemoHarness({
+    accounts,
+    rounds: 2,
+    onAction: async (action, { account }) => {
       if (action === 'continue-after-password') return { baseline: { available: true } };
+      if (action === 'fetch-qq-code' && account.id === 10) return { needsFreshCode: true };
       if (action === 'fetch-qq-code') return { code: '111111' };
       return {};
     },
-    () => '111111',
-    async () => ({ callbackUrl: 'http://localhost:1455/auth/callback?code=test' }),
-    { error() {} }
+  });
+
+  await harness.api.runFullDemo();
+
+  assert.deepEqual(
+    harness.actions
+      .filter((entry) => entry.options.account.id === 10)
+      .map((entry) => entry.action),
+    [
+      'open-first-reauth',
+      'fill-email',
+      'continue-after-email',
+      'fill-password',
+      'continue-after-password',
+      'fetch-qq-code',
+    ]
   );
-
-  await api.runFullDemo();
-
-  assert.deepEqual(steps, [
-    [0, 'open-first-reauth'],
-    [1, 'fill-email'],
-    [2, 'continue-after-email'],
-    [3, 'fill-password'],
-    [4, 'continue-after-password'],
-    [5, 'fetch-qq-code'],
-    [6, 'fill-code'],
-    [7, 'submit-code'],
-    [8, 'oauth-continue'],
-    [10, 'push-callback'],
-  ]);
-  assert.match(statuses.at(-1).message, /完整演示已完成/);
+  assert.equal(
+    harness.actions
+      .filter((entry) => entry.options.account.id === 11)
+      .at(-1)
+      .action,
+    'push-callback'
+  );
+  assert.match(harness.statuses.at(-1).message, /已重授权 1 个账号，因未获取验证码跳过 1 个账号/);
+  assert.equal(harness.statuses.at(-1).kind, 'pending');
+  assert.deepEqual(harness.progressUpdates.at(-1), {
+    type: 'update',
+    current: 2,
+    completed: 1,
+    skipped: 1,
+    phase: '本轮演示完成',
+  });
+  assert.equal(harness.closedRounds.length, 2);
 });
 
-test('full demo stops after the QQ code step when no fresh code is available', async () => {
-  const steps = [];
-  const statuses = [];
+test('full demo stops at step 4 after it opens an unsigned-in QQ mailbox', async () => {
+  const harness = createFullDemoHarness({
+    onAction: async (action) => {
+      if (action === 'continue-after-password') {
+        return { baseline: { available: false, needsLogin: true, openedMailTab: true } };
+      }
+      return {};
+    },
+  });
+
+  await harness.api.runFullDemo();
+
+  assert.equal(harness.actions.at(-1).action, 'continue-after-password');
+  assert.match(harness.statuses.at(-1).message, /已自动打开 QQ 邮箱/);
+  assert.equal(harness.statuses.at(-1).kind, 'error');
+});
+
+test('full demo adds a one-second delay after a completed learning step', async () => {
+  const delays = [];
   const api = new Function(
-    'setFullDemoBusy',
+    'throwIfFullDemoStopped',
     'setLearningStatus',
-    'ensureFullDemoPermissions',
-    'clearVerificationCode',
-    'sendLearningMessage',
-    'renderCallbackState',
-    'latestQuery',
-    'queryReauthAccounts',
-    'runFullDemoStep',
-    'getVerificationCode',
-    'waitForFullDemoCallback',
-    'console',
+    'learningActionLabels',
+    'handleLearningAction',
+    'waitForFullDemoDelay',
+    'isFullDemoStoppedError',
+    'isRetryableDemoError',
+    'FULL_DEMO_PAGE_RETRY_COUNT',
+    'FULL_DEMO_PAGE_RETRY_DELAY_MS',
+    'FULL_DEMO_STEP_DELAY_MS',
+    'setFullDemoProgress',
     `
-      ${extractAsyncFunction('runFullDemo')}
-      return { runFullDemo };
+      ${extractAsyncFunction('runFullDemoStep')}
+      return { runFullDemoStep };
     `
   )(
     () => {},
-    (message, kind) => statuses.push({ message, kind }),
-    async () => {},
-    async () => {},
-    async () => ({}),
     () => {},
-    { accounts: [{ id: 10 }] },
-    async () => { throw new Error('query should not run'); },
-    async (step, action) => {
-      steps.push([step, action]);
-      if (action === 'continue-after-password') return { baseline: { available: true } };
-      if (action === 'fetch-qq-code') return { needsFreshCode: true };
-      return {};
-    },
-    () => '',
-    async () => { throw new Error('callback should not be read'); },
-    { error() {} }
+    {},
+    async () => ({}),
+    async (ms) => { delays.push(ms); },
+    () => false,
+    () => false,
+    2,
+    900,
+    1_000,
+    () => {}
   );
 
-  await api.runFullDemo();
+  await api.runFullDemoStep(1, 'fill-email', { runId: 'run-1' });
 
-  assert.deepEqual(steps.at(-1), [5, 'fetch-qq-code']);
-  assert.match(statuses.at(-1).message, /停在第 5 步/);
-  assert.equal(statuses.at(-1).kind, 'error');
+  assert.deepEqual(delays, [1_000]);
+});
+
+test('stop control cancels the active run and wakes its pending delay', async () => {
+  const harness = createFullDemoHarness();
+  harness.api.armForStop('run-stop');
+  const pendingDelay = harness.api.waitForFullDemoDelay(10_000, 'run-stop');
+  await harness.api.stopFullDemo();
+
+  await assert.rejects(pendingDelay, /完整演示已停止/);
+  assert.deepEqual(harness.messages.at(-1), {
+    type: 'CANCEL_OPENAI_LEARNING_RUN',
+    runId: 'run-stop',
+  });
+  assert.equal(harness.stopFullDemoButton.disabled, true);
 });

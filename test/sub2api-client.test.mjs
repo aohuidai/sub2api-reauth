@@ -250,6 +250,10 @@ test('exchanges a localhost callback and updates only the original OAuth account
       if (parsed.pathname === '/api/v1/admin/accounts/10/clear-error') {
         return jsonResponse({ code: 0, data: {} });
       }
+      if (parsed.pathname === '/api/v1/admin/accounts/10/schedulable') {
+        assert.deepEqual(body, { schedulable: true });
+        return jsonResponse({ code: 0, data: { id: 10, schedulable: true } });
+      }
       return jsonResponse({ code: 1, message: 'Unexpected request' }, 404);
     },
   });
@@ -273,6 +277,9 @@ test('exchanges a localhost callback and updates only the original OAuth account
   assert.equal(updateBody.credentials.refresh_token, 'new-refresh-token');
   assert.equal(updateBody.credentials.auth_mode, 'oauth');
   assert.equal(updateBody.extra.reauth_mode, 'oauth');
+  assert.equal(updateBody.status, 'active');
   assert.deepEqual(updateBody.group_ids, [26]);
   assert.equal(calls.some((call) => call.path.endsWith('/clear-error')), true);
+  assert.equal(calls.some((call) => call.path.endsWith('/schedulable')), true);
+  assert.match(result.status, /已恢复调度/);
 });

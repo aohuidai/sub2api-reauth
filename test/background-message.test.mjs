@@ -172,6 +172,7 @@ test('service worker generates and opens the selected account reauthorization UR
           password: 'not-stored',
         },
         account: { id: 10, email: 'target@example.com', proxyId: 8 },
+        runId: 'demo-1',
       }, {}, resolve);
       assert.equal(handled, true);
     });
@@ -182,6 +183,54 @@ test('service worker generates and opens the selected account reauthorization UR
       url: 'https://auth.openai.com/oauth/authorize?state=reauth-state',
       active: true,
     }]);
+    assert.deepEqual(storage.read('openAiLearningOwnedTabsByRun'), { 'demo-1': [77] });
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker closes only tabs it opened for a completed demo round', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const removedTabs = [];
+  const storage = createSessionStorage({
+    openAiLearningAuthTabId: 77,
+    openAiLearningOwnedTabsByRun: { 'demo-1': [77, 9], 'demo-2': [88] },
+    openAiQqMailBaseline: { mailTabId: 9 },
+    openAiLearningVerificationCode: '123456',
+    sub2apiReauthContext: { account: { id: 10 } },
+  });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      remove: async (tabId) => removedTabs.push(tabId),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-close-round`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'CLOSE_OPENAI_LEARNING_ROUND',
+      runId: 'demo-1',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, { closedTabCount: 2 });
+    assert.deepEqual(removedTabs, [77, 9]);
+    assert.deepEqual(storage.read('openAiLearningOwnedTabsByRun'), { 'demo-2': [88] });
+    assert.equal(storage.read('openAiLearningAuthTabId'), undefined);
+    assert.equal(storage.read('openAiQqMailBaseline'), undefined);
+    assert.equal(storage.read('openAiLearningVerificationCode'), undefined);
+    assert.equal(storage.read('sub2apiReauthContext'), undefined);
   } finally {
     globalThis.chrome = previousChrome;
     globalThis.fetch = previousFetch;
@@ -232,6 +281,57 @@ test('service worker keeps full-demo page actions on the prepared OpenAI tab', a
     });
 
     assert.equal(response.ok, true);
+    assert.deepEqual(injected, [{
+      target: { tabId: 42 },
+      files: ['content/openai-login-learning.js'],
+    }]);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker uses the dedicated stable OAuth click command for step 8', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const injected = [];
+  const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      sendMessage: async (tabId, message) => {
+        assert.equal(tabId, 42);
+        assert.deepEqual(message, {
+          type: 'RUN_OPENAI_OAUTH_CONTINUE_V2',
+          value: { strategy: 'nativeClick' },
+        });
+        return { ok: true, result: { action: 'oauth-continue-triggered', url: 'https://auth.openai.com/consent' } };
+      },
+    },
+    scripting: {
+      executeScript: async (details) => injected.push(details),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-oauth-v2-command`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'RUN_OPENAI_LEARNING_STEP',
+      action: 'oauth-continue',
+      value: { strategy: 'nativeClick' },
+      useOpenAiAuthTab: true,
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.result.action, 'oauth-continue-triggered');
     assert.deepEqual(injected, [{
       target: { tabId: 42 },
       files: ['content/openai-login-learning.js'],
@@ -308,6 +408,134 @@ test('service worker snapshots QQ inbox IDs, then polls only with that baseline'
       { tabId: 9, updateInfo: { active: true } },
       { tabId: 42, updateInfo: { active: true } },
     ]);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker opens QQ Mail before snapshotting a missing inbox tab', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const openedTabs = [];
+  const injected = [];
+  const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      query: async ({ url }) => {
+        assert.deepEqual(url, ['https://mail.qq.com/*', 'https://wx.mail.qq.com/*']);
+        return [];
+      },
+      create: async (details) => {
+        openedTabs.push(details);
+        return { id: 9, active: true, status: 'complete', url: 'https://wx.mail.qq.com/' };
+      },
+      sendMessage: async (tabId, message) => {
+        assert.equal(tabId, 9);
+        assert.deepEqual(message, { type: 'SNAPSHOT_QQ_MAIL_BASELINE_V2' });
+        return { ok: true, result: { needsLogin: true } };
+      },
+    },
+    scripting: {
+      executeScript: async (details) => injected.push(details),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-qq-open`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'SNAPSHOT_QQ_MAIL_BASELINE',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      available: false,
+      needsLogin: true,
+      openedMailTab: true,
+      mailTabId: 9,
+    });
+    assert.deepEqual(openedTabs, [{ url: 'https://wx.mail.qq.com/', active: true }]);
+    assert.deepEqual(injected, [{
+      target: { tabId: 9 },
+      files: ['content/qq-mail-learning.js'],
+    }]);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker opens a fresh QQ Mail tab when an existing tab has no inbox list', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const openedTabs = [];
+  const injected = [];
+  const snapshotTabIds = [];
+  const activatedTabs = [];
+  const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      query: async ({ url }) => {
+        assert.deepEqual(url, ['https://mail.qq.com/*', 'https://wx.mail.qq.com/*']);
+        return [{ id: 8, active: true, status: 'complete', url: 'https://wx.mail.qq.com/mail/detail' }];
+      },
+      create: async (details) => {
+        openedTabs.push(details);
+        return { id: 9, active: true, status: 'complete', url: 'https://wx.mail.qq.com/' };
+      },
+      update: async (tabId, updateInfo) => activatedTabs.push({ tabId, updateInfo }),
+      sendMessage: async (tabId, message) => {
+        assert.deepEqual(message, { type: 'SNAPSHOT_QQ_MAIL_BASELINE_V2' });
+        snapshotTabIds.push(tabId);
+        if (tabId === 8) {
+          return { ok: false, error: '未找到 QQ 邮箱收件箱列表，请先打开收件箱。' };
+        }
+        return { ok: true, result: { mailIds: ['mail-old'] } };
+      },
+    },
+    scripting: {
+      executeScript: async (details) => injected.push(details),
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-qq-fresh-inbox`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'SNAPSHOT_QQ_MAIL_BASELINE',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      available: true,
+      openedMailTab: true,
+      mailTabId: 9,
+    });
+    assert.deepEqual(openedTabs, [{ url: 'https://wx.mail.qq.com/', active: true }]);
+    assert.deepEqual(snapshotTabIds, [8, 9]);
+    assert.deepEqual(injected, [
+      { target: { tabId: 8 }, files: ['content/qq-mail-learning.js'] },
+      { target: { tabId: 9 }, files: ['content/qq-mail-learning.js'] },
+    ]);
+    assert.deepEqual(activatedTabs, [{ tabId: 42, updateInfo: { active: true } }]);
+    assert.equal(storage.read('openAiQqMailBaseline').mailTabId, 9);
   } finally {
     globalThis.chrome = previousChrome;
     globalThis.fetch = previousFetch;
@@ -436,6 +664,10 @@ test('service worker captures a callback and pushes the selected account reautho
     if (parsed.pathname === '/api/v1/admin/accounts/10/clear-error') {
       return jsonResponse({ code: 0, data: {} });
     }
+    if (parsed.pathname === '/api/v1/admin/accounts/10/schedulable') {
+      assert.deepEqual(body, { schedulable: true });
+      return jsonResponse({ code: 0, data: { id: 10, schedulable: true } });
+    }
     return jsonResponse({ code: 1, message: 'Unexpected request' }, 404);
   };
 
@@ -478,6 +710,236 @@ test('service worker captures a callback and pushes the selected account reautho
     assert.match(pushed.result.status, /已重授权账号 #10/);
     assert.equal(storage.read('sub2apiReauthContext'), undefined);
     assert.equal(calls.filter((call) => call.path === '/api/v1/admin/accounts/10' && call.method === 'PUT').length, 1);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker captures a localhost callback from the auth tab when navigation events were missed', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const storage = createSessionStorage({
+    openAiLearningAuthTabId: 77,
+    openAiLearningCallback: {
+      active: true,
+      callbackUrl: '',
+      startedAt: Date.now(),
+      capturedAt: null,
+    },
+  });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+      sendMessage: async () => {},
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      get: async (tabId) => {
+        assert.equal(tabId, 77);
+        return {
+          id: 77,
+          url: 'http://localhost:1455/auth/callback?code=missed-code&state=reauth-state',
+        };
+      },
+      onUpdated: { addListener(listener) { listeners.onTabUpdated = listener; } },
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-callback-tab-fallback`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'GET_OPENAI_CALLBACK_CAPTURE',
+    });
+
+    assert.equal(response.ok, true);
+    assert.equal(response.result.active, false);
+    assert.match(response.result.callbackUrl, /missed-code/);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker does not mistake a transient missing OAuth button for a successful click', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const previousSetTimeout = globalThis.setTimeout;
+  const listeners = {};
+  const storage = createSessionStorage({
+    openAiLearningAuthTabId: 77,
+    openAiLearningCallback: {
+      active: true,
+      callbackUrl: '',
+      startedAt: Date.now(),
+      capturedAt: null,
+    },
+  });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      get: async () => ({ id: 77, url: 'https://auth.openai.com/consent' }),
+      sendMessage: async (_tabId, message) => {
+        assert.equal(message.type, 'GET_OPENAI_OAUTH_PAGE_STATE_V2');
+        return {
+          ok: true,
+          result: {
+            url: 'https://auth.openai.com/consent',
+            oauthConsentPage: false,
+            oauthConsentReady: false,
+          },
+        };
+      },
+      onUpdated: { addListener(listener) { listeners.onTabUpdated = listener; } },
+    },
+    scripting: { executeScript: async () => {} },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-oauth-stuck`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'WAIT_FOR_OPENAI_OAUTH_PROGRESS',
+      expectedUrl: 'https://auth.openai.com/consent',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      progressed: false,
+      stillOnConsent: false,
+      url: 'https://auth.openai.com/consent',
+    });
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+    globalThis.setTimeout = previousSetTimeout;
+  }
+});
+
+test('service worker keeps waiting when only an OAuth consent query parameter changes', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const previousSetTimeout = globalThis.setTimeout;
+  const listeners = {};
+  const storage = createSessionStorage({
+    openAiLearningAuthTabId: 77,
+    openAiLearningCallback: {
+      active: true,
+      callbackUrl: '',
+      startedAt: Date.now(),
+      capturedAt: null,
+    },
+  });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      get: async () => ({ id: 77, url: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent?render=2' }),
+      sendMessage: async (_tabId, message) => {
+        assert.equal(message.type, 'GET_OPENAI_OAUTH_PAGE_STATE_V2');
+        return {
+          ok: true,
+          result: {
+            url: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent?render=2',
+            oauthConsentPage: false,
+            oauthConsentReady: false,
+          },
+        };
+      },
+      onUpdated: { addListener(listener) { listeners.onTabUpdated = listener; } },
+    },
+    scripting: { executeScript: async () => {} },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-oauth-consent-query`);
+    const response = await sendToBackground(listeners.onMessage, {
+      type: 'WAIT_FOR_OPENAI_OAUTH_PROGRESS',
+      expectedUrl: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent',
+    });
+
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      progressed: false,
+      stillOnConsent: true,
+      url: 'https://auth.openai.com/sign-in-with-chatgpt/codex/consent?render=2',
+    });
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+    globalThis.setTimeout = previousSetTimeout;
+  }
+});
+
+test('service worker stop message marks a demo run cancelled and signals QQ Mail', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const mailMessages = [];
+  const storage = createSessionStorage();
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    tabs: {
+      query: async () => [{ id: 9, url: 'https://wx.mail.qq.com/' }],
+      sendMessage: async (tabId, message) => {
+        mailMessages.push({ tabId, message });
+        return { ok: true };
+      },
+    },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-cancel-run`);
+    const cancelled = await sendToBackground(listeners.onMessage, {
+      type: 'CANCEL_OPENAI_LEARNING_RUN',
+      runId: 'demo-stop',
+    });
+    const blocked = await sendToBackground(listeners.onMessage, {
+      type: 'RUN_OPENAI_LEARNING_STEP',
+      action: 'fill-email',
+      runId: 'demo-stop',
+    });
+
+    assert.equal(cancelled.ok, true);
+    assert.deepEqual(cancelled.result, { cancelled: true });
+    assert.deepEqual(mailMessages, [{
+      tabId: 9,
+      message: { type: 'CANCEL_QQ_OPENAI_LOGIN_CODE_V2', runId: 'demo-stop' },
+    }]);
+    assert.equal(blocked.ok, false);
+    assert.match(blocked.error, /完整演示已停止/);
   } finally {
     globalThis.chrome = previousChrome;
     globalThis.fetch = previousFetch;
