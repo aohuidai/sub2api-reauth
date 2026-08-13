@@ -12,14 +12,11 @@
     '.mail-list-page-reader-body',
   ];
   const MAIL_LIST_ROOT_SELECTOR = '.mail-list-page-items';
-  const POLL_MESSAGE = 'POLL_QQ_OPENAI_LOGIN_CODE_V2';
   const SNAPSHOT_MESSAGE = 'SNAPSHOT_QQ_MAIL_BASELINE_V2';
   const CANCEL_MESSAGE = 'CANCEL_QQ_OPENAI_LOGIN_CODE_V2';
+  const CHECK_MESSAGE = 'CHECK_QQ_OPENAI_LOGIN_CODE_V3';
   const OPENAI_MAIL_PATTERN = /openai|chatgpt|noreply@.*openai/i;
   const STOPPED_ERROR = '完整演示已停止。';
-  const DEFAULT_POLL_WAIT_SECONDS = 60;
-  const MAX_POLL_WAIT_SECONDS = 600;
-  const POLL_INTERVAL_MS = 3_000;
   const cancelledRunIds = new Set();
   const pendingRunSleeps = new Map();
 
@@ -146,6 +143,14 @@
     return '';
   }
 
+  function createTextFingerprint(text = '') {
+    let hash = 0;
+    for (const character of String(text || '')) {
+      hash = ((hash * 31) + character.charCodeAt(0)) >>> 0;
+    }
+    return `${String(text || '').length}:${hash}`;
+  }
+
   function clickControl(element) {
     try {
       element.scrollIntoView?.({ block: 'nearest' });
@@ -153,16 +158,6 @@
       // Scrolling is only a convenience for virtualized QQ Mail navigation.
     }
     element.click();
-  }
-
-  async function readCodeFromMailItem(item, summary, runId = '') {
-    throwIfRunCancelled(runId);
-    const directCode = extractVerificationCode(summary);
-    if (directCode) return directCode;
-
-    clickControl(item);
-    await sleep(700, runId);
-    return extractVerificationCode(getOpenedMailText());
   }
 
   function isInboxLabel(value = '') {
@@ -185,18 +180,16 @@
     return true;
   }
 
-  async function refreshInbox(runId = '') {
-    throwIfRunCancelled(runId);
+  function refreshInboxOnce() {
     const controls = Array.from(document.querySelectorAll('button, a, [role="button"]'));
     const refresh = controls.find((element) => isVisible(element) && /刷新|refresh/i.test(
       `${element.getAttribute('title') || ''} ${element.getAttribute('aria-label') || ''} ${element.textContent || ''}`
     ));
     if (refresh) {
       clickControl(refresh);
-      await sleep(700, runId);
-      return;
+      return true;
     }
-    await openInbox();
+    return Boolean(findInboxControl() && openInbox());
   }
 
   function isQqMailLoginPage() {
@@ -238,54 +231,59 @@
     return createMailboxBaseline();
   }
 
-  async function pollQqOpenAiLoginCode(payload = {}) {
+  function checkQqOpenAiLoginCode(payload = {}) {
     const runId = normalizeRunId(payload.runId);
     throwIfRunCancelled(runId);
-    const maxWaitSeconds = Math.max(
-      1,
-      Math.min(MAX_POLL_WAIT_SECONDS, Number(payload.maxWaitSeconds) || DEFAULT_POLL_WAIT_SECONDS)
-    );
-    const deadline = Date.now() + maxWaitSeconds * 1_000;
-    const excludedCodes = new Set((payload.excludeCodes || []).map(String));
-    if (isQqMailLoginPage()) {
-      return { needsLogin: true };
-    }
-    if (!payload.baseline || !Number(payload.baseline.capturedAt)) {
-      return { needsFreshCode: true };
-    }
+    if (isQqMailLoginPage()) return { needsLogin: true };
+    if (!payload.baseline || !Number(payload.baseline.capturedAt)) return { needsFreshCode: true };
 
     const baseline = normalizeBaseline(payload.baseline);
-    await waitForMailList(10_000, runId);
-
-    for (let attempt = 1; ; attempt += 1) {
-      throwIfRunCancelled(runId);
-      if (attempt > 1) await refreshInbox(runId);
-
-      const items = getMailItems();
-      for (const [index, item] of items.entries()) {
-        const mailId = getMailId(item, index);
-        if (baseline.mailIds.has(mailId)) continue;
-
-        const summary = getMailText(item);
-        if (!OPENAI_MAIL_PATTERN.test(summary)) continue;
-
-        const code = await readCodeFromMailItem(item, summary, runId);
-        if (code && !excludedCodes.has(code)) {
+    const candidateMailId = String(payload.candidateMailId || '');
+    const candidateDetailFingerprint = String(payload.candidateDetailFingerprint || '');
+    const openedText = getOpenedMailText();
+    if (candidateMailId && openedText) {
+      const openedFingerprint = createTextFingerprint(openedText);
+      if (openedFingerprint !== candidateDetailFingerprint) {
+        const openedCode = extractVerificationCode(openedText);
+        if (openedCode) {
           return {
-            code,
-            mailId,
+            code: openedCode,
+            mailId: candidateMailId,
             emailTimestamp: Date.now(),
             source: 'new-mail',
           };
         }
       }
-
-      const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) break;
-      await sleep(Math.min(POLL_INTERVAL_MS, remainingMs), runId);
     }
 
-    throw new Error(`等待 ${maxWaitSeconds} 秒后仍未在 QQ 邮箱中找到本次新发的 OpenAI/ChatGPT 登录验证码，请重新发送验证码后重试。`);
+    const items = getMailItems();
+    for (const [index, item] of items.entries()) {
+      const mailId = getMailId(item, index);
+      if (baseline.mailIds.has(mailId)) continue;
+
+      const summary = getMailText(item);
+      if (!OPENAI_MAIL_PATTERN.test(summary)) continue;
+      const code = extractVerificationCode(summary);
+      if (code) {
+        return {
+          code,
+          mailId,
+          emailTimestamp: Date.now(),
+          source: 'new-mail',
+        };
+      }
+      if (mailId !== candidateMailId) clickControl(item);
+      return {
+        candidateMailId: mailId,
+        candidateDetailFingerprint: createTextFingerprint(getOpenedMailText()),
+      };
+    }
+
+    if (Number(payload.checkCount || 0) % 3 === 0) refreshInboxOnce();
+    return {
+      candidateMailId,
+      candidateDetailFingerprint,
+    };
   }
 
   const handler = (message, _sender, sendResponse) => {
@@ -302,15 +300,15 @@
         }));
       return true;
     }
-    if (message?.type !== POLL_MESSAGE) return undefined;
-
-    pollQqOpenAiLoginCode(message.payload)
-      .then((result) => sendResponse({ ok: true, result }))
-      .catch((error) => sendResponse({
-        ok: false,
-        error: String(error?.message || 'QQ 邮箱验证码读取失败。'),
-      }));
-    return true;
+    if (message?.type === CHECK_MESSAGE) {
+      try {
+        sendResponse({ ok: true, result: checkQqOpenAiLoginCode(message.payload || {}) });
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error?.message || 'QQ 邮箱验证码检查失败。') });
+      }
+      return false;
+    }
+    return undefined;
   };
 
   chrome.runtime.onMessage.addListener(handler);

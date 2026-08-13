@@ -411,12 +411,12 @@ test('service worker uses the dedicated stable OAuth click command for step 8', 
   }
 });
 
-test('service worker snapshots QQ inbox IDs, then polls only with that baseline', async () => {
+test('service worker starts a QQ verification job, then completes it through short checks', async () => {
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;
   const listeners = {};
-  const activatedTabs = [];
   const injected = [];
+  const alarms = [];
   const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
 
   globalThis.chrome = {
@@ -426,18 +426,23 @@ test('service worker snapshots QQ inbox IDs, then polls only with that baseline'
     },
     sidePanel: { setPanelBehavior: async () => {} },
     storage,
+    alarms: {
+      onAlarm: { addListener(listener) { listeners.onAlarm = listener; } },
+      create: async (...args) => alarms.push(args),
+      clear: async () => true,
+    },
     tabs: {
       query: async ({ url }) => {
         assert.deepEqual(url, ['https://mail.qq.com/*', 'https://wx.mail.qq.com/*']);
         return [{ id: 9, url: 'https://wx.mail.qq.com/' }];
       },
-      update: async (tabId, updateInfo) => activatedTabs.push({ tabId, updateInfo }),
+      update: async () => {},
       sendMessage: async (tabId, message) => {
         assert.equal(tabId, 9);
         if (message.type === 'SNAPSHOT_QQ_MAIL_BASELINE_V2') {
           return { ok: true, result: { mailIds: ['mail-old'] } };
         }
-        assert.equal(message.type, 'POLL_QQ_OPENAI_LOGIN_CODE_V2');
+        assert.equal(message.type, 'CHECK_QQ_OPENAI_LOGIN_CODE_V3');
         assert.deepEqual(message.payload.baseline.mailIds, ['mail-old']);
         assert.equal(message.payload.baseline.mailTabId, 9);
         assert.equal(typeof message.payload.baseline.capturedAt, 'number');
@@ -462,21 +467,29 @@ test('service worker snapshots QQ inbox IDs, then polls only with that baseline'
 
     const response = await sendToBackground(listeners.onMessage, {
       type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
+      jobId: 'qq-job-1',
+      runId: 'demo-1',
+      mailWaitSeconds: 75,
     });
 
     assert.equal(response.ok, true);
-    assert.equal(response.result.code, '123456');
+    assert.equal(response.result.jobId, 'qq-job-1');
+    assert.equal(response.result.state, 'waiting');
+    assert.equal(response.result.maxWaitSeconds, 75);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const status = await sendToBackground(listeners.onMessage, {
+      type: 'GET_QQ_OPENAI_LOGIN_CODE_STATUS',
+      jobId: 'qq-job-1',
+    });
+    assert.equal(status.ok, true);
+    assert.equal(status.result.state, 'completed');
+    assert.equal(status.result.result.code, '123456');
     assert.equal(storage.read('openAiLearningVerificationCode'), '123456');
     assert.deepEqual(injected, [
       { target: { tabId: 9 }, files: ['content/qq-mail-learning.js'] },
       { target: { tabId: 9 }, files: ['content/qq-mail-learning.js'] },
     ]);
-    assert.deepEqual(activatedTabs, [
-      { tabId: 9, updateInfo: { active: true } },
-      { tabId: 42, updateInfo: { active: true } },
-      { tabId: 9, updateInfo: { active: true } },
-      { tabId: 42, updateInfo: { active: true } },
-    ]);
+    assert.equal(alarms.length >= 1, true);
   } finally {
     globalThis.chrome = previousChrome;
     globalThis.fetch = previousFetch;
@@ -611,12 +624,12 @@ test('service worker opens a fresh QQ Mail tab when an existing tab has no inbox
   }
 });
 
-test('service worker refuses to poll QQ Mail without a fresh inbox baseline', async () => {
+test('service worker marks a QQ verification job as needing a fresh code without a baseline', async () => {
   const previousChrome = globalThis.chrome;
   const previousFetch = globalThis.fetch;
   const listeners = {};
   const storage = createSessionStorage({ openAiLearningAuthTabId: 42 });
-  let pollRequested = false;
+  let codeCheckRequested = false;
 
   globalThis.chrome = {
     runtime: {
@@ -625,6 +638,11 @@ test('service worker refuses to poll QQ Mail without a fresh inbox baseline', as
     },
     sidePanel: { setPanelBehavior: async () => {} },
     storage,
+    alarms: {
+      onAlarm: { addListener(listener) { listeners.onAlarm = listener; } },
+      create: async () => {},
+      clear: async () => true,
+    },
     tabs: {
       query: async () => [{ id: 9, url: 'https://wx.mail.qq.com/' }],
       update: async () => {},
@@ -632,7 +650,7 @@ test('service worker refuses to poll QQ Mail without a fresh inbox baseline', as
         if (message.type === 'SNAPSHOT_QQ_MAIL_BASELINE_V2') {
           return { ok: true, result: { mailIds: ['mail-old'] } };
         }
-        if (message.type === 'POLL_QQ_OPENAI_LOGIN_CODE_V2') pollRequested = true;
+        if (message.type === 'CHECK_QQ_OPENAI_LOGIN_CODE_V3') codeCheckRequested = true;
         return { ok: true, result: { code: '123456' } };
       },
     },
@@ -644,11 +662,85 @@ test('service worker refuses to poll QQ Mail without a fresh inbox baseline', as
     await import(`../background/background.js?test=${Date.now()}-qq-no-baseline`);
     const response = await sendToBackground(listeners.onMessage, {
       type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
+      jobId: 'qq-job-no-baseline',
     });
 
     assert.equal(response.ok, true);
-    assert.equal(response.result.needsFreshCode, true);
-    assert.equal(pollRequested, false);
+    assert.equal(response.result.state, 'waiting');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const status = await sendToBackground(listeners.onMessage, {
+      type: 'GET_QQ_OPENAI_LOGIN_CODE_STATUS',
+      jobId: 'qq-job-no-baseline',
+    });
+    assert.equal(status.ok, true);
+    assert.equal(status.result.state, 'needs-fresh-code');
+    assert.equal(codeCheckRequested, false);
+  } finally {
+    globalThis.chrome = previousChrome;
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('service worker resumes a saved QQ verification job when its alarm wakes a restarted worker', async () => {
+  const previousChrome = globalThis.chrome;
+  const previousFetch = globalThis.fetch;
+  const listeners = {};
+  const now = Date.now();
+  const storage = createSessionStorage({
+    openAiLearningAuthTabId: 42,
+    openAiQqMailBaseline: {
+      mailIds: ['mail-old'],
+      capturedAt: now,
+      mailTabId: 9,
+    },
+    openAiQqMailCodeJob: {
+      jobId: 'qq-job-resume',
+      runId: 'demo-resume',
+      maxWaitSeconds: 60,
+      startedAt: now,
+      deadlineAt: now + 60_000,
+      state: 'waiting',
+      nextCheckAt: now,
+      checkCount: 0,
+      candidateMailId: '',
+      candidateDetailFingerprint: '',
+      error: '',
+    },
+  });
+
+  globalThis.chrome = {
+    runtime: {
+      onInstalled: { addListener(listener) { listeners.onInstalled = listener; } },
+      onStartup: { addListener(listener) { listeners.onStartup = listener; } },
+      onMessage: { addListener(listener) { listeners.onMessage = listener; } },
+    },
+    sidePanel: { setPanelBehavior: async () => {} },
+    storage,
+    alarms: {
+      onAlarm: { addListener(listener) { listeners.onAlarm = listener; } },
+      create: async () => {},
+      clear: async () => true,
+    },
+    tabs: {
+      query: async () => [{ id: 9, url: 'https://wx.mail.qq.com/' }],
+      sendMessage: async (_tabId, message) => {
+        assert.equal(message.type, 'CHECK_QQ_OPENAI_LOGIN_CODE_V3');
+        assert.equal(message.payload.candidateMailId, '');
+        return { ok: true, result: { code: '654321', mailId: 'mail-new' } };
+      },
+    },
+    scripting: { executeScript: async () => {} },
+  };
+  globalThis.fetch = async () => jsonResponse({ code: 0, data: {} });
+
+  try {
+    await import(`../background/background.js?test=${Date.now()}-qq-resume`);
+    listeners.onAlarm({ name: 'sub2apiReauthQqMailCodeCheck' });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(storage.read('openAiQqMailCodeJob').state, 'completed');
+    assert.equal(storage.read('openAiQqMailCodeJob').result.code, '654321');
+    assert.equal(storage.read('openAiLearningVerificationCode'), '654321');
   } finally {
     globalThis.chrome = previousChrome;
     globalThis.fetch = previousFetch;

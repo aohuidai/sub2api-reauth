@@ -147,8 +147,23 @@ function createQqMailHarness({
   return {
     async send(message) {
       assert.equal(typeof listener, 'function');
-      return new Promise((resolve) => {
-        assert.equal(listener(message, {}, resolve), true);
+      return new Promise((resolve, reject) => {
+        const expectsAsyncResponse = message.type === 'SNAPSHOT_QQ_MAIL_BASELINE_V2';
+        let returned;
+        let responseReady = false;
+        let response;
+        const sendResponse = (value) => {
+          response = value;
+          responseReady = true;
+          if (returned !== undefined) resolve(response);
+        };
+        try {
+          returned = listener(message, {}, sendResponse);
+          assert.equal(returned, expectsAsyncResponse);
+          if (responseReady) resolve(response);
+        } catch (error) {
+          reject(error);
+        }
       });
     },
     get inboxClicks() {
@@ -182,11 +197,21 @@ test('QQ Mail snapshots the inbox before a password submit, even from a mail det
   assert.deepEqual([...snapshot.result.mailIds], ['mail-old']);
   assert.equal(harness.inboxClicks, 1);
 
-  const response = await harness.send({
-    type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2',
+  const firstCheck = await harness.send({
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
     payload: {
       baseline: { ...snapshot.result, capturedAt: Date.now() },
-      maxWaitSeconds: 6,
+      checkCount: 0,
+    },
+  });
+  assert.equal(firstCheck.ok, true);
+  assert.equal(firstCheck.result.code, undefined);
+
+  const response = await harness.send({
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
+    payload: {
+      baseline: { ...snapshot.result, capturedAt: Date.now() },
+      checkCount: 1,
     },
   });
 
@@ -207,41 +232,42 @@ test('QQ Mail never falls back to an old matching verification email', async () 
   const snapshot = await harness.send({ type: 'SNAPSHOT_QQ_MAIL_BASELINE_V2' });
 
   const response = await harness.send({
-    type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2',
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
     payload: {
       baseline: { ...snapshot.result, capturedAt: Date.now() },
-      maxWaitSeconds: 1,
+      checkCount: 1,
     },
   });
 
-  assert.equal(response.ok, false);
-  assert.match(response.error, /本次新发/);
+  assert.equal(response.ok, true);
+  assert.equal(response.result.code, undefined);
+  assert.equal(response.result.candidateMailId, '');
 });
 
 test('QQ Mail requires a baseline before it accepts a verification code', async () => {
   const harness = createQqMailHarness({
     initialItems: [createMailItem('mail-1', 'OpenAI', 'Verification code', '333333')],
   });
-  const response = await harness.send({ type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2' });
+  const response = await harness.send({ type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3' });
 
   assert.equal(response.ok, true);
   assert.equal(response.result.needsFreshCode, true);
 });
 
-test('QQ Mail waits for the configured number of seconds before reporting no new code', async () => {
+test('QQ Mail returns from a single check without holding a long-lived message response', async () => {
   const harness = createQqMailHarness({
     initialItems: [createMailItem('mail-old', 'OpenAI', 'Verification code', '111111')],
   });
   const response = await harness.send({
-    type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2',
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
     payload: {
       baseline: { mailIds: ['mail-old'], capturedAt: 1 },
-      maxWaitSeconds: 7,
+      checkCount: 1,
     },
   });
 
-  assert.equal(response.ok, false);
-  assert.match(response.error, /等待 7 秒后/);
+  assert.equal(response.ok, true);
+  assert.equal(response.result.code, undefined);
 });
 
 test('QQ Mail reports an unsigned-in mailbox without polling', async () => {
@@ -249,7 +275,7 @@ test('QQ Mail reports an unsigned-in mailbox without polling', async () => {
     bodyText: 'QQ Mail login',
     hasPasswordInput: true,
   });
-  const response = await harness.send({ type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2' });
+  const response = await harness.send({ type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3' });
 
   assert.equal(response.ok, true);
   assert.equal(response.result.needsLogin, true);
@@ -275,7 +301,7 @@ test('QQ Mail rejects a cancelled run before reading a verification code', async
     runId: 'demo-stop',
   });
   const response = await harness.send({
-    type: 'POLL_QQ_OPENAI_LOGIN_CODE_V2',
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
     payload: {
       runId: 'demo-stop',
       baseline: { mailIds: [], capturedAt: Date.now() },

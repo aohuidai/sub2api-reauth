@@ -37,6 +37,7 @@ const qqMailOrigins = [
   'https://wx.mail.qq.com/*',
 ];
 const QQ_VERIFICATION_CODE_STORAGE_KEY = 'openAiLearningVerificationCode';
+const QQ_MAIL_CODE_STATUS_POLL_INTERVAL_MS = 800;
 const FULL_DEMO_PAGE_RETRY_COUNT = 12;
 const FULL_DEMO_PAGE_RETRY_DELAY_MS = 900;
 const FULL_DEMO_CALLBACK_TIMEOUT_MS = 45_000;
@@ -373,12 +374,29 @@ async function ensureFullDemoPermissions() {
   return connection;
 }
 
-async function sendLearningMessage(message) {
+async function sendLearningMessage(message, { retryOnChannelClosed = false } = {}) {
   let response;
-  try {
-    response = await chrome.runtime.sendMessage(message);
-  } catch (error) {
-    const detail = String(error?.message || error || '').trim();
+  let lastError = null;
+  const attempts = retryOnChannelClosed ? 2 : 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      response = await chrome.runtime.sendMessage(message);
+      break;
+    } catch (error) {
+      lastError = error;
+      const detail = String(error?.message || error || '').trim();
+      const channelClosed = /message channel closed|asynchronous response|receiving end does not exist/i.test(detail);
+      if (!retryOnChannelClosed || !channelClosed || attempt === attempts - 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+  if (lastError && !response) {
+    const detail = String(lastError?.message || lastError || '').trim();
+    if (retryOnChannelClosed && /message channel closed|asynchronous response|receiving end does not exist/i.test(detail)) {
+      const error = new Error('浏览器切到后台时中断了这次短消息；验证码任务仍会继续。');
+      error.code = 'BACKGROUND_CHANNEL_CLOSED';
+      throw error;
+    }
     const suffix = detail ? `：${detail}` : '';
     throw new Error(`无法连接扩展后台${suffix}。请在 chrome://extensions 重新加载 “sub2api reoauth” 后重试。`);
   }
@@ -436,16 +454,67 @@ function getMailboxWaitSeconds() {
   return seconds;
 }
 
+function createQqMailCodeJobId(runId = '') {
+  const prefix = runId || 'manual';
+  return `${prefix}-qq-code-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isWaitingForQqMailCodeJob(job = {}) {
+  return ['waiting', 'checking'].includes(String(job.state || ''));
+}
+
+async function waitForQqMailCodeJobDelay(ms, runId = '') {
+  if (runId) return waitForFullDemoDelay(ms, runId);
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForQqMailCodeJob(jobId, { runId = '' } = {}) {
+  for (;;) {
+    if (runId) throwIfFullDemoStopped(runId);
+    let job;
+    try {
+      job = await sendLearningMessage(
+        { type: 'GET_QQ_OPENAI_LOGIN_CODE_STATUS', jobId },
+        { retryOnChannelClosed: true }
+      );
+    } catch (error) {
+      if (error?.code !== 'BACKGROUND_CHANNEL_CLOSED') throw error;
+      await waitForQqMailCodeJobDelay(QQ_MAIL_CODE_STATUS_POLL_INTERVAL_MS, runId);
+      continue;
+    }
+    if (job.state === 'completed') return job.result || {};
+    if (job.state === 'needs-login' || job.state === 'needs-fresh-code') return job.result || {};
+    if (job.state === 'timed-out' || job.state === 'failed' || job.state === 'cancelled') {
+      throw new Error(job.error || 'QQ 邮箱验证码任务未完成。');
+    }
+    if (job.state === 'missing') {
+      throw new Error('QQ 邮箱验证码任务已丢失，请重新点击第 5 步。');
+    }
+    if (!isWaitingForQqMailCodeJob(job)) {
+      throw new Error('QQ 邮箱验证码任务状态异常，请重新点击第 5 步。');
+    }
+    await waitForQqMailCodeJobDelay(QQ_MAIL_CODE_STATUS_POLL_INTERVAL_MS, runId);
+  }
+}
+
 async function fetchQqOpenAiLoginCode({ runId = '' } = {}) {
   await clearVerificationCode();
   await ensureQqMailPermission();
   const mailWaitSeconds = getMailboxWaitSeconds();
   setLearningStatus(`正在从 QQ 邮箱等待验证码，最长 ${mailWaitSeconds} 秒…`, 'pending');
-  const result = await sendLearningMessage({
-    type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
-    runId,
-    mailWaitSeconds,
-  });
+  const jobId = createQqMailCodeJobId(runId);
+  try {
+    await sendLearningMessage({
+      type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
+      jobId,
+      runId,
+      mailWaitSeconds,
+    }, { retryOnChannelClosed: true });
+  } catch (error) {
+    // The worker may have saved the job before Chrome closed this short response.
+    if (error?.code !== 'BACKGROUND_CHANNEL_CLOSED') throw error;
+  }
+  const result = await waitForQqMailCodeJob(jobId, { runId });
   if (result.needsLogin) {
     setLearningStatus('已打开 QQ 邮箱标签页，请完成 QQ 登录后回到 OpenAI 标签再点击此步骤。', 'pending');
     return result;

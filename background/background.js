@@ -14,19 +14,25 @@ const OPENAI_LEARNING_OWNED_TABS_KEY = 'openAiLearningOwnedTabsByRun';
 const REAUTH_CONTEXT_KEY = 'sub2apiReauthContext';
 const QQ_MAIL_BASELINE_KEY = 'openAiQqMailBaseline';
 const QQ_VERIFICATION_CODE_KEY = 'openAiLearningVerificationCode';
-const QQ_MAIL_POLL_MESSAGE = 'POLL_QQ_OPENAI_LOGIN_CODE_V2';
+const QQ_MAIL_CODE_JOB_KEY = 'openAiQqMailCodeJob';
 const QQ_MAIL_SNAPSHOT_MESSAGE = 'SNAPSHOT_QQ_MAIL_BASELINE_V2';
 const QQ_MAIL_CANCEL_MESSAGE = 'CANCEL_QQ_OPENAI_LOGIN_CODE_V2';
+const QQ_MAIL_CODE_CHECK_MESSAGE = 'CHECK_QQ_OPENAI_LOGIN_CODE_V3';
+const QQ_MAIL_CODE_ALARM_NAME = 'sub2apiReauthQqMailCodeCheck';
 const QQ_MAIL_BASELINE_MAX_AGE_MS = 10 * 60 * 1000;
 const QQ_MAIL_ENTRY_URL = 'https://wx.mail.qq.com/';
 const QQ_MAIL_OPEN_TIMEOUT_MS = 12_000;
 const QQ_MAIL_OPEN_POLL_INTERVAL_MS = 250;
+const QQ_MAIL_CODE_CHECK_TIMEOUT_MS = 2_500;
+const QQ_MAIL_CODE_MIN_CHECK_INTERVAL_MS = 750;
+const QQ_MAIL_CODE_ALARM_PERIOD_MINUTES = 0.5;
 const OPENAI_OAUTH_PROGRESS_TIMEOUT_MS = 8_000;
 const OPENAI_OAUTH_PROGRESS_POLL_INTERVAL_MS = 250;
 const OPENAI_PASSWORD_PAGE_TIMEOUT_MS = 15_000;
 const OPENAI_PASSWORD_PAGE_POLL_INTERVAL_MS = 250;
 const FULL_DEMO_STOPPED_ERROR = '完整演示已停止。';
 const cancelledLearningRunIds = new Set();
+const qqMailCodeJobChecks = new Map();
 const QQ_MAIL_URL_PATTERNS = [
   'https://mail.qq.com/*',
   'https://wx.mail.qq.com/*',
@@ -45,6 +51,7 @@ const HANDLED_MESSAGE_TYPES = new Set([
   'OPEN_FIRST_OPENAI_REAUTH',
   'SNAPSHOT_QQ_MAIL_BASELINE',
   'FETCH_QQ_OPENAI_LOGIN_CODE',
+  'GET_QQ_OPENAI_LOGIN_CODE_STATUS',
   'SUBMIT_OPENAI_REAUTH_CALLBACK',
   'RUN_OPENAI_LEARNING_STEP',
   'CONFIRM_MANUAL_VERIFICATION_CODE',
@@ -59,6 +66,22 @@ const HANDLED_MESSAGE_TYPES = new Set([
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+  resumePendingQqMailCodeJob().catch((error) => {
+    console.warn('[sub2api reauth] QQ 邮箱验证码任务恢复失败：', error);
+  });
+});
+
+chrome.runtime.onStartup?.addListener(() => {
+  resumePendingQqMailCodeJob().catch((error) => {
+    console.warn('[sub2api reauth] QQ 邮箱验证码任务恢复失败：', error);
+  });
+});
+
+chrome.alarms?.onAlarm?.addListener((alarm) => {
+  if (alarm?.name !== QQ_MAIL_CODE_ALARM_NAME) return;
+  getQqMailCodeJob()
+    .then((job) => job?.jobId && runQqMailCodeJobCheck(job.jobId))
+    .catch((error) => console.warn('[sub2api reauth] QQ 邮箱后台检查失败：', error));
 });
 
 async function getOpenAiCallbackState() {
@@ -136,6 +159,7 @@ async function closeOpenAiLearningRound(runId = '') {
     QQ_VERIFICATION_CODE_KEY,
     REAUTH_CONTEXT_KEY,
   ]);
+  await clearQqMailCodeJob(runId);
   return { closedTabCount: tabIds.length };
 }
 
@@ -514,6 +538,280 @@ async function getQqMailBaseline() {
   return baseline;
 }
 
+function normalizeQqMailCodeJobId(value = '') {
+  return String(value || '').trim();
+}
+
+function isTerminalQqMailCodeJob(job = {}) {
+  return ['completed', 'needs-login', 'needs-fresh-code', 'timed-out', 'cancelled', 'failed'].includes(job.state);
+}
+
+async function getQqMailCodeJob() {
+  const stored = await chrome.storage.session.get(QQ_MAIL_CODE_JOB_KEY);
+  return stored[QQ_MAIL_CODE_JOB_KEY] || null;
+}
+
+async function saveQqMailCodeJob(job) {
+  await chrome.storage.session.set({ [QQ_MAIL_CODE_JOB_KEY]: job });
+  return job;
+}
+
+async function ensureQqMailCodeJobAlarm() {
+  if (typeof chrome.alarms?.create !== 'function') return;
+  await chrome.alarms.create(QQ_MAIL_CODE_ALARM_NAME, {
+    delayInMinutes: QQ_MAIL_CODE_ALARM_PERIOD_MINUTES,
+    periodInMinutes: QQ_MAIL_CODE_ALARM_PERIOD_MINUTES,
+  });
+}
+
+async function clearQqMailCodeJobAlarm() {
+  if (typeof chrome.alarms?.clear !== 'function') return;
+  await chrome.alarms.clear(QQ_MAIL_CODE_ALARM_NAME).catch(() => {});
+}
+
+async function clearQqMailCodeJob(runId = '', jobId = '') {
+  const job = await getQqMailCodeJob();
+  const normalizedRunId = normalizeLearningRunId(runId);
+  const normalizedJobId = normalizeQqMailCodeJobId(jobId);
+  if (!job) return false;
+  if (normalizedRunId && job.runId !== normalizedRunId) return false;
+  if (normalizedJobId && job.jobId !== normalizedJobId) return false;
+
+  await chrome.storage.session.remove(QQ_MAIL_CODE_JOB_KEY);
+  await clearQqMailCodeJobAlarm();
+  return true;
+}
+
+async function resumePendingQqMailCodeJob() {
+  const job = await getQqMailCodeJob();
+  if (!job || isTerminalQqMailCodeJob(job)) {
+    await clearQqMailCodeJobAlarm();
+    return job;
+  }
+  if (Date.now() >= Number(job.deadlineAt || 0)) {
+    return finishQqMailCodeJob(job, 'timed-out', { error: buildQqMailCodeTimeoutError(job) });
+  }
+
+  await ensureQqMailCodeJobAlarm();
+  runQqMailCodeJobCheck(job.jobId).catch((error) => {
+    console.warn('[sub2api reauth] QQ 邮箱验证码恢复检查失败：', error);
+  });
+  return job;
+}
+
+async function finishQqMailCodeJob(job, state, update = {}) {
+  const finished = await saveQqMailCodeJob({
+    ...job,
+    ...update,
+    state,
+    checkingStartedAt: null,
+    completedAt: Date.now(),
+  });
+  await clearQqMailCodeJobAlarm();
+  return finished;
+}
+
+async function deferQqMailCodeJob(job, update = {}) {
+  const deferred = await saveQqMailCodeJob({
+    ...job,
+    ...update,
+    state: 'waiting',
+    checkingStartedAt: null,
+    nextCheckAt: Date.now() + QQ_MAIL_CODE_MIN_CHECK_INTERVAL_MS,
+  });
+  await ensureQqMailCodeJobAlarm();
+  return deferred;
+}
+
+function buildQqMailCodeTimeoutError(job = {}) {
+  return `等待 ${job.maxWaitSeconds} 秒后仍未在 QQ 邮箱中找到本次新发的 OpenAI/ChatGPT 登录验证码，请重新发送验证码后重试。`;
+}
+
+async function startQqMailCodeJob({ jobId = '', runId = '', mailWaitSeconds = 60 } = {}) {
+  const normalizedJobId = normalizeQqMailCodeJobId(jobId);
+  if (!normalizedJobId) throw new Error('缺少 QQ 邮箱验证码任务标识。');
+
+  const existing = await getQqMailCodeJob();
+  if (existing?.jobId === normalizedJobId) return existing;
+  if (existing && !isTerminalQqMailCodeJob(existing)) {
+    await clearQqMailCodeJob('', existing.jobId);
+  }
+
+  const maxWaitSeconds = Math.max(1, Math.min(600, Number(mailWaitSeconds) || 60));
+  const startedAt = Date.now();
+  const job = await saveQqMailCodeJob({
+    jobId: normalizedJobId,
+    runId: normalizeLearningRunId(runId),
+    maxWaitSeconds,
+    startedAt,
+    deadlineAt: startedAt + maxWaitSeconds * 1_000,
+    state: 'waiting',
+    nextCheckAt: startedAt,
+    checkCount: 0,
+    candidateMailId: '',
+    candidateDetailFingerprint: '',
+    error: '',
+  });
+  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
+  await ensureQqMailCodeJobAlarm();
+  runQqMailCodeJobCheck(job.jobId).catch((error) => {
+    console.warn('[sub2api reauth] QQ 邮箱验证码初次检查失败：', error);
+  });
+  return job;
+}
+
+async function getQqMailCodeJobStatus(jobId = '') {
+  const normalizedJobId = normalizeQqMailCodeJobId(jobId);
+  const job = await getQqMailCodeJob();
+  if (!job || job.jobId !== normalizedJobId) {
+    return { jobId: normalizedJobId, state: 'missing' };
+  }
+
+  const now = Date.now();
+  const staleCheck = job.state === 'checking'
+    && now - Number(job.checkingStartedAt || 0) >= QQ_MAIL_CODE_CHECK_TIMEOUT_MS * 2;
+  if (!isTerminalQqMailCodeJob(job) && (staleCheck || now >= Number(job.nextCheckAt || 0))) {
+    runQqMailCodeJobCheck(job.jobId).catch((error) => {
+      console.warn('[sub2api reauth] QQ 邮箱验证码状态检查失败：', error);
+    });
+  }
+  return job;
+}
+
+async function sendQqMailCodeCheck(mailTabId, payload) {
+  let timeoutId;
+  const responsePromise = chrome.tabs.sendMessage(mailTabId, {
+    type: QQ_MAIL_CODE_CHECK_MESSAGE,
+    payload,
+  }).catch((error) => ({ transportError: String(error?.message || error || 'QQ 邮箱检查未响应。') }));
+  const timeoutPromise = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve({ transportError: 'QQ 邮箱检查超时。' }), QQ_MAIL_CODE_CHECK_TIMEOUT_MS);
+  });
+  const response = await Promise.race([responsePromise, timeoutPromise]);
+  clearTimeout(timeoutId);
+  return response;
+}
+
+async function performQqMailCodeJobCheck(jobId = '') {
+  let job = await getQqMailCodeJob();
+  if (!job || job.jobId !== jobId || isTerminalQqMailCodeJob(job)) return job;
+
+  const now = Date.now();
+  if (now >= Number(job.deadlineAt || 0)) {
+    return finishQqMailCodeJob(job, 'timed-out', { error: buildQqMailCodeTimeoutError(job) });
+  }
+  if (job.state === 'checking' && now - Number(job.checkingStartedAt || 0) < QQ_MAIL_CODE_CHECK_TIMEOUT_MS * 2) {
+    return job;
+  }
+
+  job = await saveQqMailCodeJob({
+    ...job,
+    state: 'checking',
+    checkingStartedAt: now,
+    checkCount: Number(job.checkCount || 0) + 1,
+  });
+
+  const runId = job.runId;
+  try {
+    throwIfLearningRunCancelled(runId);
+    const baseline = await getQqMailBaseline();
+    if (!baseline) {
+      const prepared = await captureQqMailBaseline(runId);
+      if (prepared.needsLogin) {
+        return finishQqMailCodeJob(job, 'needs-login', { result: prepared });
+      }
+      if (prepared.error) {
+        return deferQqMailCodeJob(job, { error: prepared.error });
+      }
+      return finishQqMailCodeJob(job, 'needs-fresh-code', {
+        result: { needsFreshCode: true },
+      });
+    }
+
+    const authTabId = await getOpenAiAuthTabId();
+    let mailTab = await findQqMailTab(baseline.mailTabId);
+    if (!mailTab) {
+      mailTab = await openQqMailTab(runId);
+      return finishQqMailCodeJob(job, 'needs-login', {
+        result: {
+          needsLogin: true,
+          mailTabId: Number.isInteger(mailTab?.id) ? mailTab.id : null,
+        },
+      });
+    }
+    if (mailTab.id !== baseline.mailTabId) {
+      await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+      return finishQqMailCodeJob(job, 'needs-fresh-code', {
+        result: { needsFreshCode: true },
+      });
+    }
+
+    await injectQqMailLearningScript(mailTab.id);
+    throwIfLearningRunCancelled(runId);
+    const response = await sendQqMailCodeCheck(mailTab.id, {
+      runId,
+      baseline,
+      candidateMailId: job.candidateMailId || '',
+      candidateDetailFingerprint: job.candidateDetailFingerprint || '',
+      checkCount: job.checkCount,
+    });
+    throwIfLearningRunCancelled(runId);
+    if (response?.transportError || !response?.ok) {
+      return deferQqMailCodeJob(job, {
+        error: response?.transportError || response?.error || 'QQ 邮箱暂时未响应。',
+      });
+    }
+
+    const result = response.result || {};
+    if (result.needsLogin) {
+      return finishQqMailCodeJob(job, 'needs-login', {
+        result: { ...result, mailTabId: mailTab.id },
+      });
+    }
+    if (result.needsFreshCode) {
+      return finishQqMailCodeJob(job, 'needs-fresh-code', { result });
+    }
+    const code = normalizeVerificationCode(result.code);
+    if (code) {
+      const completedResult = {
+        ...result,
+        code,
+        needsLogin: false,
+        mailTabId: mailTab.id,
+        authTabId,
+      };
+      await chrome.storage.session.set({ [QQ_VERIFICATION_CODE_KEY]: code });
+      return finishQqMailCodeJob(job, 'completed', { result: completedResult, error: '' });
+    }
+    const candidateMailId = String(result.candidateMailId || job.candidateMailId || '');
+    const candidateDetailFingerprint = candidateMailId === String(result.candidateMailId || '')
+      ? String(result.candidateDetailFingerprint || '')
+      : String(job.candidateDetailFingerprint || '');
+    return deferQqMailCodeJob(job, {
+      candidateMailId,
+      candidateDetailFingerprint,
+      error: '',
+    });
+  } catch (error) {
+    if (isLearningRunCancelled(runId)) {
+      return finishQqMailCodeJob(job, 'cancelled', { error: FULL_DEMO_STOPPED_ERROR });
+    }
+    return deferQqMailCodeJob(job, { error: String(error?.message || error || 'QQ 邮箱检查失败。') });
+  }
+}
+
+async function runQqMailCodeJobCheck(jobId = '') {
+  const normalizedJobId = normalizeQqMailCodeJobId(jobId);
+  if (!normalizedJobId) return null;
+  const active = qqMailCodeJobChecks.get(normalizedJobId);
+  if (active) return active;
+
+  const task = performQqMailCodeJobCheck(normalizedJobId)
+    .finally(() => qqMailCodeJobChecks.delete(normalizedJobId));
+  qqMailCodeJobChecks.set(normalizedJobId, task);
+  return task;
+}
+
 async function captureQqMailBaseline(runId = '') {
   throwIfLearningRunCancelled(runId);
   let mailTab = await findQqMailTab();
@@ -586,85 +884,6 @@ async function captureQqMailBaseline(runId = '') {
   }
 }
 
-async function fetchQqOpenAiLoginCode(runId = '', mailWaitSeconds = 60) {
-  throwIfLearningRunCancelled(runId);
-  const authTabId = await getOpenAiAuthTabId();
-  let baseline = await getQqMailBaseline();
-  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
-  if (!baseline) {
-    const prepared = await captureQqMailBaseline(runId);
-    throwIfLearningRunCancelled(runId);
-    if (prepared.needsLogin) return prepared;
-    if (prepared.error) throw new Error(prepared.error);
-    const currentMailTab = await findQqMailTab();
-    if (!prepared.available && !currentMailTab) {
-      const openedMailTab = await openQqMailTab(runId);
-      return {
-        needsLogin: true,
-        mailTabId: Number.isInteger(openedMailTab?.id) ? openedMailTab.id : null,
-      };
-    }
-    return { needsFreshCode: true };
-  }
-  let mailTab = await findQqMailTab(baseline.mailTabId);
-  if (!mailTab) {
-    mailTab = await openQqMailTab(runId);
-    return {
-      needsLogin: true,
-      mailTabId: Number.isInteger(mailTab?.id) ? mailTab.id : null,
-    };
-  }
-  if (mailTab.id !== baseline.mailTabId) {
-    await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
-    return { needsFreshCode: true };
-  }
-
-  const mailTabId = mailTab.id;
-  let shouldRestoreAuthTab = Number.isInteger(authTabId) && authTabId !== mailTabId;
-  try {
-    throwIfLearningRunCancelled(runId);
-    await activateTab(mailTabId);
-    await injectQqMailLearningScript(mailTabId);
-    throwIfLearningRunCancelled(runId);
-    const pollMessage = {
-      type: QQ_MAIL_POLL_MESSAGE,
-      payload: {
-        maxWaitSeconds: mailWaitSeconds,
-        baseline,
-      },
-    };
-    if (runId) pollMessage.payload.runId = runId;
-    const response = await chrome.tabs.sendMessage(mailTabId, pollMessage);
-    throwIfLearningRunCancelled(runId);
-    if (!response?.ok) {
-      throw new Error(response?.error || 'QQ 邮箱未返回验证码。');
-    }
-    if (response.result?.needsLogin) {
-      shouldRestoreAuthTab = false;
-      return {
-        needsLogin: true,
-        mailTabId,
-      };
-    }
-    if (response.result?.needsFreshCode) {
-      return { needsFreshCode: true };
-    }
-    const code = normalizeVerificationCode(response.result?.code);
-    await chrome.storage.session.set({ [QQ_VERIFICATION_CODE_KEY]: code });
-    return {
-      ...response.result,
-      code,
-      needsLogin: false,
-      mailTabId,
-      authTabId,
-    };
-  } finally {
-    if (shouldRestoreAuthTab && !isLearningRunCancelled(runId)) {
-      await activateTab(authTabId).catch(() => {});
-    }
-  }
-}
-
 async function confirmManualVerificationCode(code) {
   // 用一个手动适配器调用与 FlowPilot 同名的“取码”函数，保留清晰的职责边界。
   return pollFreshVerificationCode(8, {}, {
@@ -675,6 +894,11 @@ async function confirmManualVerificationCode(code) {
 async function cancelOpenAiLearningRun(runId = '') {
   const cancelled = rememberCancelledLearningRun(runId);
   if (!cancelled) return { cancelled: false };
+
+  const job = await getQqMailCodeJob();
+  if (job?.runId === normalizeLearningRunId(runId) && !isTerminalQqMailCodeJob(job)) {
+    await finishQqMailCodeJob(job, 'cancelled', { error: FULL_DEMO_STOPPED_ERROR });
+  }
 
   const mailTab = await findQqMailTab().catch(() => null);
   if (Number.isInteger(mailTab?.id)) {
@@ -727,7 +951,17 @@ async function handleMessage(message = {}) {
   }
 
   if (message.type === 'FETCH_QQ_OPENAI_LOGIN_CODE') {
-    return { result: await fetchQqOpenAiLoginCode(message.runId, message.mailWaitSeconds) };
+    return {
+      result: await startQqMailCodeJob({
+        jobId: message.jobId,
+        runId: message.runId,
+        mailWaitSeconds: message.mailWaitSeconds,
+      }),
+    };
+  }
+
+  if (message.type === 'GET_QQ_OPENAI_LOGIN_CODE_STATUS') {
+    return { result: await getQqMailCodeJobStatus(message.jobId) };
   }
 
   if (message.type === 'SNAPSHOT_QQ_MAIL_BASELINE') {

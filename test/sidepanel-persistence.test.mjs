@@ -135,6 +135,8 @@ test('side panel validates and forwards the configured QQ mailbox wait time', as
     'getMailboxWaitSeconds',
     'setLearningStatus',
     'sendLearningMessage',
+    'createQqMailCodeJobId',
+    'waitForQqMailCodeJob',
     'verificationCodeInput',
     'saveVerificationCode',
     `
@@ -148,6 +150,12 @@ test('side panel validates and forwards the configured QQ mailbox wait time', as
     (message, kind) => statuses.push({ message, kind }),
     async (message) => {
       sent.push(message);
+      return { state: 'waiting' };
+    },
+    () => 'demo-1-qq-code-test',
+    async (jobId, options) => {
+      assert.equal(jobId, 'demo-1-qq-code-test');
+      assert.deepEqual(options, { runId: 'demo-1' });
       return { code: '123456' };
     },
     verificationCodeInput,
@@ -159,10 +167,50 @@ test('side panel validates and forwards the configured QQ mailbox wait time', as
   assert.equal(result.code, '123456');
   assert.deepEqual(sent, [{
     type: 'FETCH_QQ_OPENAI_LOGIN_CODE',
+    jobId: 'demo-1-qq-code-test',
     runId: 'demo-1',
     mailWaitSeconds: 75,
   }]);
   assert.match(statuses[0].message, /最长 75 秒/);
+});
+
+test('side panel keeps polling a QQ verification job after a short message channel closes', async () => {
+  const delays = [];
+  let requestCount = 0;
+  const api = new Function(
+    'throwIfFullDemoStopped',
+    'sendLearningMessage',
+    'waitForQqMailCodeJobDelay',
+    'QQ_MAIL_CODE_STATUS_POLL_INTERVAL_MS',
+    `
+      ${extractFunction('isWaitingForQqMailCodeJob')}
+      ${extractAsyncFunction('waitForQqMailCodeJob')}
+      return { waitForQqMailCodeJob };
+    `
+  )(
+    () => {},
+    async () => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        const error = new Error('message channel closed');
+        error.code = 'BACKGROUND_CHANNEL_CLOSED';
+        throw error;
+      }
+      if (requestCount === 2) return { state: 'waiting' };
+      return { state: 'completed', result: { code: '654321' } };
+    },
+    async (delay, runId) => delays.push({ delay, runId }),
+    800
+  );
+
+  const result = await api.waitForQqMailCodeJob('qq-job-closed-channel', { runId: 'demo-1' });
+
+  assert.deepEqual(result, { code: '654321' });
+  assert.equal(requestCount, 3);
+  assert.deepEqual(delays, [
+    { delay: 800, runId: 'demo-1' },
+    { delay: 800, runId: 'demo-1' },
+  ]);
 });
 
 test('side panel rejects an invalid QQ mailbox wait time', () => {

@@ -9,7 +9,7 @@ test('manifest declares a minimal MV3 side panel extension', async () => {
   assert.equal(manifest.background.service_worker, 'background/background.js');
   assert.equal(manifest.background.type, 'module');
   assert.equal(manifest.side_panel.default_path, 'sidepanel/sidepanel.html');
-  assert.deepEqual(manifest.permissions, ['sidePanel', 'storage', 'scripting', 'tabs', 'webNavigation']);
+  assert.deepEqual(manifest.permissions, ['sidePanel', 'storage', 'scripting', 'tabs', 'webNavigation', 'alarms']);
   assert.equal(Object.hasOwn(manifest, 'host_permissions'), false);
   assert.deepEqual(manifest.optional_host_permissions, ['http://*/*', 'https://*/*']);
 });
