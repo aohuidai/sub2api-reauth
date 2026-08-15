@@ -2,7 +2,6 @@
 
 ## 作者亲笔：
 
-![image-20260813202638432](/Users/daihuiao/Library/Application Support/typora-user-images/image-20260813202638432.png)
 
 插件功能：填写sub2api的地址和秘钥以后，查询相应分组的错误账号，并依次执行重新授权操作，只能读取qq邮箱，获得回调地址后通过api写入sub2api，并将状态设置为可用。账号的密码需要在第三步那里填写一下。
 
