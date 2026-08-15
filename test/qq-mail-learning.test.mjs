@@ -18,6 +18,10 @@ class FakeElement {
     return this.attributes[name] || '';
   }
 
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
   querySelector(selector) {
     return Object.entries(this.children).find(([key]) => selector.includes(key))?.[1] || null;
   }
@@ -56,6 +60,7 @@ function createMailItem(mailId, sender, subject, digest) {
 function createQqMailHarness({
   bodyText = '',
   detailText = '',
+  detailMailId = '',
   hasPasswordInput = false,
   initialItems = [],
   refreshedItems = initialItems,
@@ -66,7 +71,11 @@ function createQqMailHarness({
   let inInbox = startInInbox;
   let inboxClicks = 0;
   let now = 0;
-  const detail = new FakeElement({ text: detailText });
+  let openedDetailMailId = detailMailId;
+  const detail = new FakeElement({
+    attributes: detailMailId ? { 'data-mailid': detailMailId } : {},
+    text: detailText,
+  });
   const listRoot = new FakeElement();
   const inboxControl = new FakeElement({
     attributes: { 'data-sidebar-dir-id': '1' },
@@ -83,6 +92,18 @@ function createQqMailHarness({
       items = refreshedItems;
     },
   });
+  for (const item of refreshedItems) {
+    const originalClick = item.onClick;
+    item.onClick = () => {
+      originalClick?.();
+      const mailId = item.getAttribute('data-mailid');
+      for (const candidate of [...initialItems, ...refreshedItems]) {
+        candidate.setAttribute('aria-selected', String(candidate === item));
+      }
+      openedDetailMailId = mailId;
+      detail.setAttribute('data-mailid', openedDetailMailId);
+    };
+  }
   const document = {
     body: { innerText: bodyText },
     querySelectorAll(selector) {
@@ -100,7 +121,7 @@ function createQqMailHarness({
         '.mail-reader-body',
         '.mail-list-page-reader-body',
       ].includes(selector)) {
-        return !inInbox && detailText ? [detail] : [];
+        return detailText ? [detail] : [];
       }
       if (selector === '.frame-sidebar-menu[data-sidebar-dir-id]') return [inboxControl];
       if (selector === 'button, a, [role="button"]') return [refreshControl];
@@ -168,6 +189,13 @@ function createQqMailHarness({
     },
     get inboxClicks() {
       return inboxClicks;
+    },
+    openMail(mailId) {
+      openedDetailMailId = mailId;
+      detail.setAttribute('data-mailid', openedDetailMailId);
+      for (const candidate of [...initialItems, ...refreshedItems]) {
+        candidate.setAttribute('aria-selected', String(candidate.getAttribute('data-mailid') === mailId));
+      }
     },
   };
 }
@@ -242,6 +270,90 @@ test('QQ Mail never falls back to an old matching verification email', async () 
   assert.equal(response.ok, true);
   assert.equal(response.result.code, undefined);
   assert.equal(response.result.candidateMailId, '');
+});
+
+test('QQ Mail does not accept a changed detail view unless it belongs to the candidate mail', async () => {
+  const oldMail = createMailItem(
+    'mail-old',
+    'OpenAI',
+    'Your OpenAI verification code',
+    'Enter this code to continue: 111111'
+  );
+  const candidateMail = createMailItem(
+    'mail-new',
+    'OpenAI',
+    'Your OpenAI verification code',
+    'Open this message to view the code'
+  );
+  const harness = createQqMailHarness({
+    detailText: 'A different old message has verification code 222222',
+    detailMailId: 'mail-old',
+    initialItems: [oldMail],
+    refreshedItems: [candidateMail, oldMail],
+  });
+  const snapshot = await harness.send({ type: 'SNAPSHOT_QQ_MAIL_BASELINE_V2' });
+
+  const firstCheck = await harness.send({
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
+    payload: {
+      baseline: { ...snapshot.result, capturedAt: Date.now() },
+      checkCount: 1,
+    },
+  });
+  assert.equal(firstCheck.ok, true);
+  assert.equal(firstCheck.result.candidateMailId, 'mail-new');
+  harness.openMail('mail-old');
+
+  const secondCheck = await harness.send({
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
+    payload: {
+      baseline: { ...snapshot.result, capturedAt: Date.now() },
+      candidateMailId: 'mail-new',
+      candidateDetailFingerprint: firstCheck.result.candidateDetailFingerprint,
+      checkCount: 2,
+    },
+  });
+
+  assert.equal(secondCheck.ok, true);
+  assert.equal(secondCheck.result.code, undefined);
+  assert.equal(secondCheck.result.clearCandidate, true);
+});
+
+test('QQ Mail reads a changed detail view when it still belongs to the candidate mail', async () => {
+  const oldMail = createMailItem(
+    'mail-old',
+    'OpenAI',
+    'Your OpenAI verification code',
+    'Enter this code to continue: 111111'
+  );
+  const candidateMail = createMailItem(
+    'mail-new',
+    'OpenAI',
+    'Your OpenAI verification code',
+    'Open this message to view the code'
+  );
+  const harness = createQqMailHarness({
+    detailText: 'Enter this code to continue: 333333',
+    detailMailId: 'mail-new',
+    initialItems: [oldMail],
+    refreshedItems: [candidateMail, oldMail],
+  });
+  const snapshot = await harness.send({ type: 'SNAPSHOT_QQ_MAIL_BASELINE_V2' });
+  harness.openMail('mail-new');
+
+  const response = await harness.send({
+    type: 'CHECK_QQ_OPENAI_LOGIN_CODE_V3',
+    payload: {
+      baseline: { ...snapshot.result, capturedAt: Date.now() },
+      candidateMailId: 'mail-new',
+      candidateDetailFingerprint: '0:0',
+      checkCount: 2,
+    },
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(response.result.code, '333333');
+  assert.equal(response.result.mailId, 'mail-new');
 });
 
 test('QQ Mail requires a baseline before it accepts a verification code', async () => {

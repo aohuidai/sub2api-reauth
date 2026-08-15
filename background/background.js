@@ -33,6 +33,9 @@ const OPENAI_PASSWORD_PAGE_POLL_INTERVAL_MS = 250;
 const FULL_DEMO_STOPPED_ERROR = '完整演示已停止。';
 const cancelledLearningRunIds = new Set();
 const qqMailCodeJobChecks = new Map();
+// chrome.storage.session 没有“比较后写入”操作。把下面的小状态迁移串行化，
+// 可以避免同一次 service worker 生命周期中的旧检查结果覆盖新验证码任务。
+let qqMailCodeJobMutation = Promise.resolve();
 const QQ_MAIL_URL_PATTERNS = [
   'https://mail.qq.com/*',
   'https://wx.mail.qq.com/*',
@@ -154,12 +157,13 @@ async function closeOpenAiLearningRound(runId = '') {
   if (tabIds.includes(authTabId)) {
     await chrome.storage.session.remove(OPENAI_AUTH_TAB_KEY);
   }
+  // 在一次受保护的状态迁移中删除任务和验证码。等待中的 QQ 返回要么先完成，
+  // 随后连同验证码一起被清除；要么看到任务已不存在，因此不会留下新结果。
+  await clearQqMailCodeJob(runId, '', { clearVerificationCode: true });
   await chrome.storage.session.remove([
     QQ_MAIL_BASELINE_KEY,
-    QQ_VERIFICATION_CODE_KEY,
     REAUTH_CONTEXT_KEY,
   ]);
-  await clearQqMailCodeJob(runId);
   return { closedTabCount: tabIds.length };
 }
 
@@ -169,7 +173,7 @@ async function getReauthContext() {
 }
 
 async function activateTab(tabId) {
-  if (!Number.isInteger(tabId)) return;
+  if (!Number.isInteger(tabId) || typeof chrome.tabs?.update !== 'function') return;
   await chrome.tabs.update(tabId, { active: true });
 }
 
@@ -556,6 +560,51 @@ async function saveQqMailCodeJob(job) {
   return job;
 }
 
+/**
+ * 每次只执行一个任务状态迁移。
+ *
+ * 一次邮箱检查会经过注入脚本、读取 QQ 页面、等待消息返回等多个 await。期间用户
+ * 可能再次点击第 5 步；这个队列让每次最终写入都重新读取 storage 并拒绝旧任务。
+ */
+function mutateQqMailCodeJob(mutator) {
+  const mutation = qqMailCodeJobMutation.then(mutator, mutator);
+  qqMailCodeJobMutation = mutation.catch(() => {});
+  return mutation;
+}
+
+function hasSameQqMailCodeJobId(currentJob, expectedJob) {
+  return Boolean(
+    currentJob
+    && expectedJob
+    && currentJob.jobId === expectedJob.jobId
+  );
+}
+
+/**
+ * 仅当发起本次工作的任务仍是当前任务时才更新它。
+ * 返回 null 代表用户的下一次点击已经替换或清除了该任务。
+ */
+async function updateCurrentQqMailCodeJob(expectedJob, update) {
+  return mutateQqMailCodeJob(async () => {
+    const currentJob = await getQqMailCodeJob();
+    if (!hasSameQqMailCodeJobId(currentJob, expectedJob)) return null;
+
+    const nextJob = {
+      ...currentJob,
+      ...(typeof update === 'function' ? update(currentJob) : update),
+    };
+    return saveQqMailCodeJob(nextJob);
+  });
+}
+
+async function markQqMailCodeJobChecking(job, checkedAt = Date.now()) {
+  return updateCurrentQqMailCodeJob(job, (currentJob) => ({
+    state: 'checking',
+    checkingStartedAt: checkedAt,
+    checkCount: Number(currentJob.checkCount || 0) + 1,
+  }));
+}
+
 async function ensureQqMailCodeJobAlarm() {
   if (typeof chrome.alarms?.create !== 'function') return;
   await chrome.alarms.create(QQ_MAIL_CODE_ALARM_NAME, {
@@ -569,17 +618,40 @@ async function clearQqMailCodeJobAlarm() {
   await chrome.alarms.clear(QQ_MAIL_CODE_ALARM_NAME).catch(() => {});
 }
 
-async function clearQqMailCodeJob(runId = '', jobId = '') {
-  const job = await getQqMailCodeJob();
+async function clearQqMailCodeJob(runId = '', jobId = '', { clearVerificationCode = false } = {}) {
   const normalizedRunId = normalizeLearningRunId(runId);
   const normalizedJobId = normalizeQqMailCodeJobId(jobId);
-  if (!job) return false;
-  if (normalizedRunId && job.runId !== normalizedRunId) return false;
-  if (normalizedJobId && job.jobId !== normalizedJobId) return false;
+  return mutateQqMailCodeJob(async () => {
+    const job = await getQqMailCodeJob();
+    // 完成的任务可能已被移除，但临时验证码仍存在。没有当前任务时，该验证码
+    // 已经不属于任何新轮次，调用方可以安全清除它。
+    if (!job) {
+      if (clearVerificationCode) await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
+      return clearVerificationCode;
+    }
+    if (normalizedRunId && job.runId !== normalizedRunId) return false;
+    if (normalizedJobId && job.jobId !== normalizedJobId) return false;
 
-  await chrome.storage.session.remove(QQ_MAIL_CODE_JOB_KEY);
-  await clearQqMailCodeJobAlarm();
-  return true;
+    const keysToRemove = [QQ_MAIL_CODE_JOB_KEY];
+    if (clearVerificationCode) keysToRemove.push(QQ_VERIFICATION_CODE_KEY);
+    await chrome.storage.session.remove(keysToRemove);
+    await clearQqMailCodeJobAlarm();
+    return true;
+  });
+}
+
+/**
+ * 邮箱快照是共享 session 状态。只有发现邮箱标签失效的当前任务才可以清除它，
+ * 已被替换的旧任务不能破坏新一次点击建立的快照。
+ */
+async function clearQqMailBaselineForCurrentJob(job) {
+  return mutateQqMailCodeJob(async () => {
+    const currentJob = await getQqMailCodeJob();
+    if (!hasSameQqMailCodeJobId(currentJob, job)) return false;
+
+    await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+    return true;
+  });
 }
 
 async function resumePendingQqMailCodeJob() {
@@ -600,27 +672,62 @@ async function resumePendingQqMailCodeJob() {
 }
 
 async function finishQqMailCodeJob(job, state, update = {}) {
-  const finished = await saveQqMailCodeJob({
-    ...job,
-    ...update,
-    state,
-    checkingStartedAt: null,
-    completedAt: Date.now(),
+  return mutateQqMailCodeJob(async () => {
+    const currentJob = await getQqMailCodeJob();
+    if (!hasSameQqMailCodeJobId(currentJob, job)) return null;
+
+    const finished = await saveQqMailCodeJob({
+      ...currentJob,
+      ...update,
+      state,
+      checkingStartedAt: null,
+      completedAt: Date.now(),
+    });
+    await clearQqMailCodeJobAlarm();
+    return finished;
   });
-  await clearQqMailCodeJobAlarm();
-  return finished;
 }
 
 async function deferQqMailCodeJob(job, update = {}) {
-  const deferred = await saveQqMailCodeJob({
-    ...job,
-    ...update,
-    state: 'waiting',
-    checkingStartedAt: null,
-    nextCheckAt: Date.now() + QQ_MAIL_CODE_MIN_CHECK_INTERVAL_MS,
+  return mutateQqMailCodeJob(async () => {
+    const currentJob = await getQqMailCodeJob();
+    if (!hasSameQqMailCodeJobId(currentJob, job)) return null;
+
+    const deferred = await saveQqMailCodeJob({
+      ...currentJob,
+      ...update,
+      state: 'waiting',
+      checkingStartedAt: null,
+      nextCheckAt: Date.now() + QQ_MAIL_CODE_MIN_CHECK_INTERVAL_MS,
+    });
+    await ensureQqMailCodeJobAlarm();
+    return deferred;
   });
-  await ensureQqMailCodeJobAlarm();
-  return deferred;
+}
+
+/**
+ * 在一次操作中提交完成状态和验证码。这是侧边栏临时验证码的唯一写入路径。
+ */
+async function completeQqMailCodeJob(job, code, result) {
+  return mutateQqMailCodeJob(async () => {
+    const currentJob = await getQqMailCodeJob();
+    if (!hasSameQqMailCodeJobId(currentJob, job)) return null;
+
+    const completedJob = {
+      ...currentJob,
+      state: 'completed',
+      result,
+      error: '',
+      checkingStartedAt: null,
+      completedAt: Date.now(),
+    };
+    await chrome.storage.session.set({
+      [QQ_MAIL_CODE_JOB_KEY]: completedJob,
+      [QQ_VERIFICATION_CODE_KEY]: code,
+    });
+    await clearQqMailCodeJobAlarm();
+    return completedJob;
+  });
 }
 
 function buildQqMailCodeTimeoutError(job = {}) {
@@ -631,33 +738,38 @@ async function startQqMailCodeJob({ jobId = '', runId = '', mailWaitSeconds = 60
   const normalizedJobId = normalizeQqMailCodeJobId(jobId);
   if (!normalizedJobId) throw new Error('缺少 QQ 邮箱验证码任务标识。');
 
-  const existing = await getQqMailCodeJob();
-  if (existing?.jobId === normalizedJobId) return existing;
-  if (existing && !isTerminalQqMailCodeJob(existing)) {
-    await clearQqMailCodeJob('', existing.jobId);
-  }
-
   const maxWaitSeconds = Math.max(1, Math.min(600, Number(mailWaitSeconds) || 60));
   const startedAt = Date.now();
-  const job = await saveQqMailCodeJob({
-    jobId: normalizedJobId,
-    runId: normalizeLearningRunId(runId),
-    maxWaitSeconds,
-    startedAt,
-    deadlineAt: startedAt + maxWaitSeconds * 1_000,
-    state: 'waiting',
-    nextCheckAt: startedAt,
-    checkCount: 0,
-    candidateMailId: '',
-    candidateDetailFingerprint: '',
-    error: '',
+  const started = await mutateQqMailCodeJob(async () => {
+    const existing = await getQqMailCodeJob();
+    if (existing?.jobId === normalizedJobId) return { job: existing, created: false };
+
+    const job = await saveQqMailCodeJob({
+      jobId: normalizedJobId,
+      runId: normalizeLearningRunId(runId),
+      maxWaitSeconds,
+      startedAt,
+      deadlineAt: startedAt + maxWaitSeconds * 1_000,
+      state: 'waiting',
+      nextCheckAt: startedAt,
+      // 此任务已经开始过多少次短 QQ 邮箱检查。
+      checkCount: 0,
+      // 当前在 QQ 邮箱中打开的新邮件；尚未选中时为空。
+      candidateMailId: '',
+      // 打开候选邮件前看到的详情文本，用来判断候选详情是否已完成渲染。
+      candidateDetailFingerprint: '',
+      error: '',
+    });
+    await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
+    await ensureQqMailCodeJobAlarm();
+    return { job, created: true };
   });
-  await chrome.storage.session.remove(QQ_VERIFICATION_CODE_KEY);
-  await ensureQqMailCodeJobAlarm();
-  runQqMailCodeJobCheck(job.jobId).catch((error) => {
-    console.warn('[sub2api reauth] QQ 邮箱验证码初次检查失败：', error);
-  });
-  return job;
+  if (started.created) {
+    runQqMailCodeJobCheck(started.job.jobId).catch((error) => {
+      console.warn('[sub2api reauth] QQ 邮箱验证码初次检查失败：', error);
+    });
+  }
+  return started.job;
 }
 
 async function getQqMailCodeJobStatus(jobId = '') {
@@ -704,12 +816,8 @@ async function performQqMailCodeJobCheck(jobId = '') {
     return job;
   }
 
-  job = await saveQqMailCodeJob({
-    ...job,
-    state: 'checking',
-    checkingStartedAt: now,
-    checkCount: Number(job.checkCount || 0) + 1,
-  });
+  job = await markQqMailCodeJobChecking(job, now);
+  if (!job) return null;
 
   const runId = job.runId;
   try {
@@ -740,7 +848,8 @@ async function performQqMailCodeJobCheck(jobId = '') {
       });
     }
     if (mailTab.id !== baseline.mailTabId) {
-      await chrome.storage.session.remove(QQ_MAIL_BASELINE_KEY);
+      const clearedBaseline = await clearQqMailBaselineForCurrentJob(job);
+      if (!clearedBaseline) return null;
       return finishQqMailCodeJob(job, 'needs-fresh-code', {
         result: { needsFreshCode: true },
       });
@@ -780,13 +889,20 @@ async function performQqMailCodeJobCheck(jobId = '') {
         mailTabId: mailTab.id,
         authTabId,
       };
-      await chrome.storage.session.set({ [QQ_VERIFICATION_CODE_KEY]: code });
-      return finishQqMailCodeJob(job, 'completed', { result: completedResult, error: '' });
+      const completedJob = await completeQqMailCodeJob(job, code, completedResult);
+      // 普通轮询不抢焦点；只有当前任务确实完成后，才回到需要填写验证码的页面。
+      if (completedJob) await activateTab(authTabId).catch(() => {});
+      return completedJob;
     }
-    const candidateMailId = String(result.candidateMailId || job.candidateMailId || '');
-    const candidateDetailFingerprint = candidateMailId === String(result.candidateMailId || '')
-      ? String(result.candidateDetailFingerprint || '')
-      : String(job.candidateDetailFingerprint || '');
+    const candidateWasCleared = result.clearCandidate === true;
+    const candidateMailId = candidateWasCleared
+      ? ''
+      : String(result.candidateMailId || job.candidateMailId || '');
+    const candidateDetailFingerprint = candidateWasCleared
+      ? ''
+      : (candidateMailId === String(result.candidateMailId || '')
+        ? String(result.candidateDetailFingerprint || '')
+        : String(job.candidateDetailFingerprint || ''));
     return deferQqMailCodeJob(job, {
       candidateMailId,
       candidateDetailFingerprint,

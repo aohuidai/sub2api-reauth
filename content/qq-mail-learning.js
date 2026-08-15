@@ -11,6 +11,7 @@
     '.mail-reader-body',
     '.mail-list-page-reader-body',
   ];
+  const MAIL_ID_ATTRIBUTES = ['data-mailid', 'data-mail-id'];
   const MAIL_LIST_ROOT_SELECTOR = '.mail-list-page-items';
   const SNAPSHOT_MESSAGE = 'SNAPSHOT_QQ_MAIL_BASELINE_V2';
   const CANCEL_MESSAGE = 'CANCEL_QQ_OPENAI_LOGIN_CODE_V2';
@@ -91,9 +92,7 @@
   }
 
   function getMailId(item, index) {
-    return item.getAttribute('data-mailid')
-      || item.getAttribute('data-mail-id')
-      || `visible-mail-${index}`;
+    return getElementMailId(item) || `visible-mail-${index}`;
   }
 
   function getMailText(item) {
@@ -103,7 +102,19 @@
     return normalizeText(`${sender} ${subject} ${digest} ${item.innerText || ''}`);
   }
 
-  function getOpenedMailText() {
+  function getElementMailId(element) {
+    let current = element;
+    while (current instanceof HTMLElement) {
+      for (const attribute of MAIL_ID_ATTRIBUTES) {
+        const mailId = String(current.getAttribute?.(attribute) || '').trim();
+        if (mailId) return mailId;
+      }
+      current = current.parentElement;
+    }
+    return '';
+  }
+
+  function getOpenedMailSections() {
     const sections = [];
     const seen = new Set();
     for (const selector of MAIL_DETAIL_SELECTORS) {
@@ -113,7 +124,52 @@
         sections.push(element.innerText || element.textContent || '');
       }
     }
-    return normalizeText(sections.join(' '));
+    return { elements: [...seen], text: normalizeText(sections.join(' ')) };
+  }
+
+  function getOpenedMailText() {
+    return getOpenedMailSections().text;
+  }
+
+  function getOpenedMailId() {
+    const mailIds = new Set(
+      getOpenedMailSections().elements
+        .map(getElementMailId)
+        .filter(Boolean)
+    );
+    // 同时看到多个详情 ID 通常表示 QQ 邮箱的虚拟列表正在重绘；此时不猜测正文属于哪封邮件。
+    return mailIds.size === 1 ? [...mailIds][0] : '';
+  }
+
+  function hasSelectedMailState(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const selectedAttributes = ['aria-selected', 'data-selected', 'data-active'];
+    if (selectedAttributes.some((attribute) => element.getAttribute?.(attribute) === 'true')) {
+      return true;
+    }
+    if (['true', 'page'].includes(element.getAttribute?.('aria-current'))) return true;
+
+    const className = String(element.className || element.getAttribute?.('class') || '');
+    return /(?:^|[\s_-])(?:is-)?(?:active|selected|current)(?:[\s_-]|$)/i.test(className);
+  }
+
+  function getSelectedMailId() {
+    for (const [index, item] of getMailItems().entries()) {
+      if (hasSelectedMailState(item) || hasSelectedMailState(item.querySelector?.('[aria-selected="true"], [data-selected="true"], [data-active="true"], [aria-current="true"], .selected, .active, .current'))) {
+        return getMailId(item, index);
+      }
+    }
+    return '';
+  }
+
+  function getCandidateMailState(candidateMailId) {
+    const openedMailId = getOpenedMailId();
+    const selectedMailId = getSelectedMailId();
+    if (openedMailId && openedMailId !== candidateMailId) return { clearCandidate: true };
+    if (selectedMailId && selectedMailId !== candidateMailId) return { clearCandidate: true };
+    return {
+      isCandidateOpen: openedMailId === candidateMailId || selectedMailId === candidateMailId,
+    };
   }
 
   function createMailboxBaseline() {
@@ -192,6 +248,13 @@
     return Boolean(findInboxControl() && openInbox());
   }
 
+  function shouldRefreshInbox(checkCount, candidateMailId) {
+    if (candidateMailId) return false;
+    // checkCount 来自后台任务，首次值为 1。第一次立即刷新以尽快请求新邮件，
+    // 后续每三次刷新一次，兼顾延迟邮件和短检查的响应速度。
+    return checkCount === 1 || (checkCount > 1 && checkCount % 3 === 0);
+  }
+
   function isQqMailLoginPage() {
     if (document.querySelector('input[type="password"], input[name*="password" i], input[id*="password" i]')) {
       return true;
@@ -240,10 +303,13 @@
     const baseline = normalizeBaseline(payload.baseline);
     const candidateMailId = String(payload.candidateMailId || '');
     const candidateDetailFingerprint = String(payload.candidateDetailFingerprint || '');
-    const openedText = getOpenedMailText();
-    if (candidateMailId && openedText) {
+    if (candidateMailId) {
+      const candidateState = getCandidateMailState(candidateMailId);
+      if (candidateState.clearCandidate) return { clearCandidate: true };
+
+      const openedText = getOpenedMailText();
       const openedFingerprint = createTextFingerprint(openedText);
-      if (openedFingerprint !== candidateDetailFingerprint) {
+      if (candidateState.isCandidateOpen && openedText && openedFingerprint !== candidateDetailFingerprint) {
         const openedCode = extractVerificationCode(openedText);
         if (openedCode) {
           return {
@@ -255,6 +321,9 @@
         }
       }
     }
+
+    const checkCount = Number(payload.checkCount || 0);
+    if (shouldRefreshInbox(checkCount, candidateMailId)) refreshInboxOnce();
 
     const items = getMailItems();
     for (const [index, item] of items.entries()) {
@@ -272,14 +341,16 @@
           source: 'new-mail',
         };
       }
+      // 记录点击前的详情。QQ 邮箱有时同步、有时异步更新；下次检查只需确认
+      // 详情内容已替换，就能可靠判断候选邮件已经渲染完成。
+      const detailBeforeOpeningCandidate = createTextFingerprint(getOpenedMailText());
       if (mailId !== candidateMailId) clickControl(item);
       return {
         candidateMailId: mailId,
-        candidateDetailFingerprint: createTextFingerprint(getOpenedMailText()),
+        candidateDetailFingerprint: detailBeforeOpeningCandidate,
       };
     }
 
-    if (Number(payload.checkCount || 0) % 3 === 0) refreshInboxOnce();
     return {
       candidateMailId,
       candidateDetailFingerprint,
